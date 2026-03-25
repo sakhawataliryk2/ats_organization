@@ -1,0 +1,3559 @@
+"use client";
+
+import React, {
+  useState,
+  useEffect,
+  useMemo,
+  useRef,
+  useLayoutEffect,
+} from "react";
+import { createPortal } from "react-dom";
+import { toast } from "sonner";
+import { useRouter, useSearchParams } from "next/navigation";
+import {
+  FiX,
+  FiPrinter,
+  FiArrowUp,
+  FiArrowDown,
+  FiFilter,
+  FiRefreshCw,
+} from "react-icons/fi";
+import { BsFillPinAngleFill } from "react-icons/bs";
+import {
+  isOffice365Authenticated,
+  sendCalendarInvite,
+  type CalendarEvent,
+} from "@/lib/office365";
+import { formatDisplayRecordNumber } from "@/lib/recordIdFormatter";
+import {
+  isPinnedRecord,
+  togglePinnedRecord,
+  PINNED_RECORDS_CHANGED_EVENT,
+} from "@/lib/pinnedRecords";
+import { TbGripVertical } from "react-icons/tb";
+import { DndContext, closestCenter, type DragEndEvent } from "@dnd-kit/core";
+import {
+  SortableContext,
+  useSortable,
+  horizontalListSortingStrategy,
+  arrayMove,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import RecordNameResolver from "@/components/RecordNameResolver";
+import DocumentViewer from "@/components/DocumentViewer";
+
+interface Appointment {
+  id: number;
+  date: string;
+  start_time?: string;
+  time: string;
+  type: string;
+  participant_type?: string;
+  participant_id?: number;
+  job_id?: number;
+  client: string;
+  job: string;
+  references: string[];
+  owner: string;
+  owner_id?: number;
+  description?: string;
+  location?: string;
+  duration?: number;
+  status?: "scheduled" | "live" | "completed";
+  zoom_meeting_id?: number;
+  zoom_join_url?: string;
+  zoom_start_url?: string;
+  zoom_password?: string;
+  document_urls?: string[];
+}
+
+type ColumnSortState = "asc" | "desc" | null;
+type ColumnFilterState = string | null;
+type InviteeType = "job_seeker" | "hiring_manager" | "internal";
+
+// Sortable Column Header Component
+function SortableColumnHeader({
+  id,
+  columnKey,
+  label,
+  sortState,
+  filterValue,
+  onSort,
+  onFilterChange,
+  filterType,
+  filterOptions,
+}: {
+  id: string;
+  columnKey: string;
+  label: string;
+  sortState: ColumnSortState;
+  filterValue: ColumnFilterState;
+  onSort: () => void;
+  onFilterChange: (value: string) => void;
+  filterType: "text" | "select" | "number";
+  filterOptions?: { label: string; value: string }[];
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id });
+
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+
+  const [showFilter, setShowFilter] = useState(false);
+  const filterRef = useRef<HTMLDivElement>(null);
+  const filterToggleRef = useRef<HTMLButtonElement>(null);
+  const thRef = useRef<HTMLTableCellElement | null>(null);
+  const [filterPosition, setFilterPosition] = useState<{
+    top: number;
+    left: number;
+    width: number;
+  } | null>(null);
+
+  useLayoutEffect(() => {
+    if (!showFilter || !filterToggleRef.current || !thRef.current) {
+      setFilterPosition(null);
+      return;
+    }
+    const btnRect = filterToggleRef.current.getBoundingClientRect();
+    const thRect = thRef.current.getBoundingClientRect();
+    setFilterPosition({
+      top: btnRect.bottom + 4,
+      left: thRect.left,
+      width: Math.max(150, Math.min(250, thRect.width)),
+    });
+  }, [showFilter]);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        filterRef.current &&
+        !filterRef.current.contains(event.target as Node) &&
+        !(event.target as HTMLElement).closest(`[data-filter-toggle="${id}"]`)
+      ) {
+        setShowFilter(false);
+      }
+    };
+
+    if (showFilter) {
+      document.addEventListener("mousedown", handleClickOutside);
+      return () =>
+        document.removeEventListener("mousedown", handleClickOutside);
+    }
+  }, [showFilter, id]);
+
+  return (
+    <th
+      ref={(node) => {
+        thRef.current = node;
+        setNodeRef(node);
+      }}
+      style={style}
+      className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50 border-r border-gray-200 relative group"
+    >
+      <div className="flex items-center gap-2">
+        {/* Drag Handle */}
+        <button
+          {...attributes}
+          {...listeners}
+          className="cursor-grab active:cursor-grabbing text-gray-400 hover:text-gray-600 opacity-0 group-hover:opacity-100 transition-opacity"
+          title="Drag to reorder column"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <TbGripVertical size={16} />
+        </button>
+
+        {/* Column Label */}
+        <span className="flex-1">{label}</span>
+
+        {/* Sort Control */}
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onSort();
+          }}
+          className="text-gray-400 hover:text-gray-600 transition-colors"
+          title={
+            sortState === "asc"
+              ? "Sort descending"
+              : sortState === "desc"
+                ? "Sort ascending"
+                : "Sort"
+          }
+        >
+          {sortState === "asc" ? (
+            <FiArrowUp size={14} />
+          ) : sortState === "desc" ? (
+            <FiArrowDown size={14} />
+          ) : (
+            <FiArrowDown size={14} className="opacity-30" />
+          )}
+        </button>
+
+        {/* Filter Toggle */}
+        <button
+          ref={filterToggleRef}
+          data-filter-toggle={id}
+          onClick={(e) => {
+            e.stopPropagation();
+            setShowFilter(!showFilter);
+          }}
+          className={`text-gray-400 hover:text-gray-600 transition-colors ${
+            filterValue ? "text-blue-600" : ""
+          }`}
+          title="Filter column"
+        >
+          <FiFilter size={14} />
+        </button>
+      </div>
+
+      {/* Filter Dropdown (portal so it stays on top) */}
+      {showFilter &&
+        filterPosition &&
+        typeof document !== "undefined" &&
+        createPortal(
+          <div
+            ref={filterRef}
+            className="bg-white border border-gray-300 shadow-lg rounded p-2 z-50 min-w-[150px]"
+            style={{
+              position: "fixed",
+              top: filterPosition.top,
+              left: filterPosition.left,
+              width: filterPosition.width,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {filterType === "text" && (
+              <input
+                type="text"
+                value={filterValue || ""}
+                onChange={(e) => onFilterChange(e.target.value)}
+                placeholder={`Filter ${label.toLowerCase()}...`}
+                className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                autoFocus
+              />
+            )}
+            {filterType === "number" && (
+              <input
+                type="number"
+                value={filterValue || ""}
+                onChange={(e) => onFilterChange(e.target.value)}
+                placeholder={`Filter ${label.toLowerCase()}...`}
+                className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                autoFocus
+              />
+            )}
+            {filterType === "select" && filterOptions && (
+              <select
+                value={filterValue || ""}
+                onChange={(e) => onFilterChange(e.target.value)}
+                className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                autoFocus
+              >
+                <option value="">All</option>
+                {filterOptions.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            )}
+            {filterValue && (
+              <button
+                onClick={() => {
+                  onFilterChange("");
+                  setShowFilter(false);
+                }}
+                className="mt-2 w-full px-2 py-1 text-xs text-red-600 hover:bg-red-50 rounded"
+              >
+                Clear Filter
+              </button>
+            )}
+          </div>,
+          document.body,
+        )}
+    </th>
+  );
+}
+
+// Searchable "Show" owner filter for planner top bar
+function OwnerSearchSelect({
+  value,
+  options,
+  onChange,
+  placeholder = "Search and select...",
+}: {
+  value: number[]; // empty => all internal users
+  options: { id: number; name: string; email?: string }[];
+  onChange: (ids: number[]) => void;
+  placeholder?: string;
+}) {
+  const [search, setSearch] = useState("");
+  const [isOpen, setIsOpen] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  const allOptions = useMemo(
+    () =>
+      options.map((u) => ({
+        id: u.id,
+        name: `${u.name}${u.email ? ` (${u.email})` : ""}`,
+        email: u.email,
+      })),
+    [options],
+  );
+
+  const displayValue = useMemo(() => {
+    if (!value.length) return "All internal users' appointments";
+    if (value.length === 1) {
+      const u = allOptions.find((o) => o.id === value[0]);
+      return u?.name ?? `User #${value[0]}`;
+    }
+    return `${value.length} users selected`;
+  }, [value, allOptions]);
+
+  const filteredOptions = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return allOptions;
+    return allOptions.filter(
+      (opt) =>
+        opt.name.toLowerCase().includes(q) ||
+        opt.email?.toLowerCase().includes(q),
+    );
+  }, [search, allOptions, options]);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        wrapperRef.current &&
+        !wrapperRef.current.contains(event.target as Node)
+      ) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  const toggleId = (id: number) => {
+    onChange(value.includes(id) ? value.filter((v) => v !== id) : [...value, id]);
+  };
+
+  return (
+    <div ref={wrapperRef} className="relative min-w-[200px] max-w-[240px]">
+      <div className="w-full flex items-center gap-2 border border-gray-300 rounded px-2 py-1.5 bg-white text-sm">
+        <span className="text-gray-600 whitespace-nowrap shrink-0">Show:</span>
+        <input
+          type="text"
+          value={isOpen ? search : displayValue}
+          onChange={(e) => {
+            setSearch(e.target.value);
+            setIsOpen(true);
+          }}
+          onFocus={() => setIsOpen(true)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setIsOpen(false);
+          }}
+          placeholder={displayValue ? "" : placeholder}
+          className="flex-1 min-w-0 outline-none bg-transparent"
+          autoComplete="off"
+        />
+      </div>
+      {isOpen && (
+        <div
+          className="absolute z-20 mt-1 left-0 right-0 bg-white border border-gray-200 rounded shadow-lg max-h-56 overflow-auto"
+        >
+          <button
+            type="button"
+            onClick={() => {
+              onChange([]);
+              setSearch("");
+              setIsOpen(false);
+            }}
+            className={`w-full text-left px-3 py-2.5 text-sm hover:bg-gray-50 ${
+              value.length === 0 ? "font-medium text-blue-700 bg-blue-50" : "text-gray-800"
+            }`}
+          >
+            All internal users' appointments
+          </button>
+          {filteredOptions.length === 0 ? (
+            <div className="px-3 py-4 text-sm text-gray-500 text-center">
+              No users match your search.
+            </div>
+          ) : (
+            filteredOptions.map((opt, idx) => (
+              <button
+                key={`user-${opt.id}`}
+                type="button"
+                onClick={() => toggleId(opt.id)}
+                className={`w-full text-left px-3 py-2.5 text-sm text-gray-800 hover:bg-gray-50 ${
+                  value.includes(opt.id) ? "font-medium text-blue-700 bg-blue-50" : ""
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    readOnly
+                    checked={value.includes(opt.id)}
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  <span className="truncate">{opt.name}</span>
+                </span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function InviteeSearchAdd({
+  jobSeekers,
+  hiringManagers,
+  internalUsers,
+  disabled,
+  onAdd,
+}: {
+  jobSeekers: any[];
+  hiringManagers: any[];
+  internalUsers: { id: number; name: string; email?: string }[];
+  disabled?: boolean;
+  onAdd: (inv: { type: InviteeType; id: number }) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const [isOpen, setIsOpen] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  const options = useMemo(() => {
+    const js = (jobSeekers || []).map((r: any) => {
+      const name =
+        r.full_name ||
+        [r.first_name, r.last_name].filter(Boolean).join(" ") ||
+        `Job Seeker #${r.id}`;
+      const label = `${name}${r.email ? ` (${r.email})` : ""}`;
+      return { type: "job_seeker" as const, id: Number(r.id), label };
+    });
+    const hm = (hiringManagers || []).map((r: any) => {
+      const name =
+        r.full_name ||
+        [r.first_name, r.last_name].filter(Boolean).join(" ") ||
+        `Hiring Manager #${r.id}`;
+      const label = `${name}${r.email ? ` (${r.email})` : ""}`;
+      return { type: "hiring_manager" as const, id: Number(r.id), label };
+    });
+    const iu = (internalUsers || []).map((u) => ({
+      type: "internal" as const,
+      id: Number(u.id),
+      label: `${u.name}${u.email ? ` (${u.email})` : ""}`,
+    }));
+    return [...js, ...hm, ...iu].filter((o) => Number.isFinite(o.id));
+  }, [jobSeekers, hiringManagers, internalUsers]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return options;
+    return options.filter((o) => o.label.toLowerCase().includes(q));
+  }, [options, search]);
+
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, []);
+
+  return (
+    <div ref={wrapperRef} className="relative">
+      <input
+        type="text"
+        value={search}
+        onChange={(e) => {
+          setSearch(e.target.value);
+          setIsOpen(true);
+        }}
+        onFocus={() => setIsOpen(true)}
+        placeholder="Search and select invitee..."
+        className="w-full p-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+        disabled={disabled}
+        autoComplete="off"
+      />
+      {isOpen && (
+        <div className="absolute z-30 mt-1 left-0 right-0 bg-white border border-gray-200 rounded shadow-lg max-h-56 overflow-auto">
+          {filtered.length === 0 ? (
+            <div className="px-3 py-3 text-sm text-gray-500 text-center">
+              No matches.
+            </div>
+          ) : (
+            filtered.map((opt) => (
+              <button
+                key={`${opt.type}-${opt.id}`}
+                type="button"
+                onClick={() => {
+                  onAdd({ type: opt.type, id: opt.id });
+                  setSearch("");
+                  setIsOpen(false);
+                }}
+                className="w-full text-left px-3 py-2 text-sm text-gray-800 hover:bg-gray-50"
+              >
+                {opt.label}
+              </button>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const PLANNER_PINNED_KEY = "planner";
+
+const Planners = () => {
+  const router = useRouter();
+  const [selectedDate, setSelectedDate] = useState(new Date());
+  const [currentMonth, setCurrentMonth] = useState(new Date());
+  const [viewType, setViewType] = useState<"Month" | "Week" | "Day" | "List">(
+    "Month",
+  );
+  const [itemsPerPage, setItemsPerPage] = useState(10);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [isRecordPinned, setIsRecordPinned] = useState(false);
+  const [appointments, setAppointments] = useState<Appointment[]>([]);
+  const [isLoadingAppointments, setIsLoadingAppointments] = useState(false);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [appointmentForm, setAppointmentForm] = useState({
+    date: "",
+    time: "",
+    type: "",
+    participant_type: "",
+    participant_id: "",
+    job_id: "",
+    description: "",
+    duration: 30,
+    sendInvites: true,
+  });
+  const [invitees, setInvitees] = useState<
+    { type: InviteeType; id: number }[]
+  >([]);
+  const [isSavingAppointment, setIsSavingAppointment] = useState(false);
+  const [appointmentDocuments, setAppointmentDocuments] = useState<File[]>([]);
+  const [documentViewer, setDocumentViewer] = useState<{
+    url: string;
+    name?: string;
+  } | null>(null);
+
+  // Lookup data for participants
+  const [jobSeekers, setJobSeekers] = useState<any[]>([]);
+  const [hiringManagers, setHiringManagers] = useState<any[]>([]);
+  const [organizations, setOrganizations] = useState<any[]>([]);
+  const [jobs, setJobs] = useState<any[]>([]);
+  const [isLoadingLookups, setIsLoadingLookups] = useState(false);
+
+  // Internal users for planner filter (owner dropdown)
+  const [internalUsers, setInternalUsers] = useState<
+    { id: number; name: string; email?: string }[]
+  >([]);
+  const [ownerFilter, setOwnerFilter] = useState<number[]>([]); // empty => all
+
+  // Column management for List view
+  const [columnFields, setColumnFields] = useState<string[]>([
+    "date",
+    "time",
+    "type",
+    "status",
+    "participant",
+    "job",
+    "duration",
+    "zoom",
+    "documents",
+  ]);
+  const [columnSorts, setColumnSorts] = useState<
+    Record<string, ColumnSortState>
+  >({});
+  const [columnFilters, setColumnFilters] = useState<
+    Record<string, ColumnFilterState>
+  >({});
+
+  // Column management for Month view table (below calendar)
+  const [monthTableColumnFields, setMonthTableColumnFields] = useState<
+    string[]
+  >(["time", "type", "status", "participant", "job", "zoom", "documents", "duration"]);
+  const [monthTableColumnSorts, setMonthTableColumnSorts] = useState<
+    Record<string, ColumnSortState>
+  >({});
+  const [monthTableColumnFilters, setMonthTableColumnFilters] = useState<
+    Record<string, ColumnFilterState>
+  >({});
+  const [monthTableCurrentPage, setMonthTableCurrentPage] = useState(1);
+  const [monthTableItemsPerPage, setMonthTableItemsPerPage] = useState(10);
+
+  const searchParams = useSearchParams();
+  const [highlightAppointmentId, setHighlightAppointmentId] = useState<
+    number | null
+  >(null);
+  const [listViewFilterDate, setListViewFilterDate] = useState<string | null>(
+    null,
+  );
+  const listViewRowRef = useRef<HTMLTableRowElement | null>(null);
+
+  // Apply date/view/appointmentId from URL (e.g. from dashboard appointment click)
+  useEffect(() => {
+    const dateParam = searchParams?.get("date");
+    const viewParam = searchParams?.get("view");
+    const appointmentIdParam = searchParams?.get("appointmentId");
+    if (dateParam) {
+      const d = new Date(dateParam);
+      if (!Number.isNaN(d.getTime())) {
+        setSelectedDate(d);
+        setCurrentMonth(new Date(d.getFullYear(), d.getMonth(), 1));
+        setListViewFilterDate(dateParam);
+        setCurrentPage(1);
+      }
+    }
+    if (viewParam === "List") {
+      setViewType("List");
+    }
+    if (appointmentIdParam) {
+      const id = parseInt(appointmentIdParam, 10);
+      if (!Number.isNaN(id)) setHighlightAppointmentId(id);
+    }
+  }, [searchParams]);
+
+  // One-time handler: open Add Appointment modal with pre-filled data when requested via URL
+  const hasInitializedFromUrl = useRef(false);
+  const pendingApplicationStatusUpdate = useRef<{
+    candidateId: string;
+    applicationId: string;
+  } | null>(null);
+  useEffect(() => {
+    if (hasInitializedFromUrl.current) return;
+    const addParam = searchParams?.get("addAppointment");
+    if (!addParam || (addParam !== "1" && addParam.toLowerCase() !== "true"))
+      return;
+
+    hasInitializedFromUrl.current = true;
+
+    const participantTypeParam = searchParams?.get("participantType") || "";
+    const participantIdParam = searchParams?.get("participantId") || "";
+    const jobIdParam = searchParams?.get("jobId") || "";
+    const appointmentTypeParam =
+      searchParams?.get("appointmentType") || "Interview";
+    const applicationIdParam = searchParams?.get("applicationId") || "";
+    const candidateIdParam = searchParams?.get("candidateId") || "";
+    if (applicationIdParam && candidateIdParam) {
+      pendingApplicationStatusUpdate.current = {
+        candidateId: candidateIdParam,
+        applicationId: applicationIdParam,
+      };
+    }
+
+    const today = new Date();
+    const dateStr = today.toISOString().split("T")[0];
+
+    setAppointmentForm((prev) => ({
+      ...prev,
+      date: prev.date || dateStr,
+      time: prev.time || "",
+      type: prev.type || appointmentTypeParam,
+      participant_type: participantTypeParam || prev.participant_type,
+      participant_id: participantIdParam || prev.participant_id,
+      job_id: jobIdParam || prev.job_id,
+    }));
+    setInvitees([]);
+    setShowAddModal(true);
+  }, [searchParams]);
+
+  // Scroll highlighted row into view when List view has loaded
+  useEffect(() => {
+    if (
+      highlightAppointmentId != null &&
+      viewType === "List" &&
+      listViewRowRef.current
+    ) {
+      listViewRowRef.current.scrollIntoView({
+        behavior: "smooth",
+        block: "nearest",
+      });
+    }
+  }, [highlightAppointmentId, viewType, appointments.length]);
+
+  const hasSetPageForHighlight = useRef(false);
+  // When opened with appointmentId, ensure we're on the page that contains that appointment (after filtered list is ready)
+  useEffect(() => {
+    if (highlightAppointmentId == null || !listViewFilterDate) return;
+    if (hasSetPageForHighlight.current) return;
+    hasSetPageForHighlight.current = true;
+    const filtered = [...appointments].filter((apt) => {
+      if (!apt.date) return false;
+      const aptDate = new Date(apt.date);
+      const y = aptDate.getFullYear();
+      const m = String(aptDate.getMonth() + 1).padStart(2, "0");
+      const d = String(aptDate.getDate()).padStart(2, "0");
+      return `${y}-${m}-${d}` === listViewFilterDate;
+    });
+    const index = filtered.findIndex((a) => a.id === highlightAppointmentId);
+    if (index >= 0) {
+      const page = Math.floor(index / itemsPerPage) + 1;
+      setCurrentPage(page);
+    }
+  }, [highlightAppointmentId, listViewFilterDate, appointments, itemsPerPage]);
+
+  // Sync pinned state with DashboardNav (pinned records bar)
+  useEffect(() => {
+    const syncPinned = () => {
+      setIsRecordPinned(isPinnedRecord(PLANNER_PINNED_KEY));
+    };
+    syncPinned();
+    window.addEventListener(PINNED_RECORDS_CHANGED_EVENT, syncPinned);
+    return () =>
+      window.removeEventListener(PINNED_RECORDS_CHANGED_EVENT, syncPinned);
+  }, []);
+
+  // Fetch lookup data for participants
+  useEffect(() => {
+    const fetchLookups = async () => {
+      setIsLoadingLookups(true);
+      try {
+        const token = document.cookie.replace(
+          /(?:(?:^|.*;\s*)token\s*=\s*([^;]*).*$)|^.*$/,
+          "$1",
+        );
+        // Strip trailing slash to avoid double slash in URLs (e.g. ...vercel.app//api/...) which causes CORS preflight redirect errors
+        const apiUrl = (
+          process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8080"
+        ).replace(/\/$/, "");
+
+        // Fetch job seekers
+        try {
+          const jsResponse = await fetch(`${apiUrl}/api/job-seekers`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (jsResponse.ok) {
+            const jsData = await jsResponse.json();
+            setJobSeekers(jsData.jobSeekers || jsData.data || []);
+          }
+        } catch (jsError) {
+          console.error("Error fetching job seekers:", jsError);
+        }
+
+        // Fetch hiring managers
+        try {
+          const hmResponse = await fetch(`${apiUrl}/api/hiring-managers`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (hmResponse.ok) {
+            const hmData = await hmResponse.json();
+            setHiringManagers(hmData.hiringManagers || hmData.data || []);
+          }
+        } catch (hmError) {
+          console.error("Error fetching hiring managers:", hmError);
+        }
+
+        // Fetch organizations
+        try {
+          const orgResponse = await fetch(`${apiUrl}/api/organizations`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (orgResponse.ok) {
+            const orgData = await orgResponse.json();
+            setOrganizations(orgData.organizations || orgData.data || []);
+          }
+        } catch (orgError) {
+          console.error("Error fetching organizations:", orgError);
+        }
+
+        // Fetch jobs
+        try {
+          const jobResponse = await fetch(`${apiUrl}/api/jobs`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (jobResponse.ok) {
+            const jobData = await jobResponse.json();
+            const list = jobData.jobs || jobData.data || [];
+            const activeOnly = Array.isArray(list)
+              ? list.filter((j: any) => {
+                  const status = String(j?.status ?? "").toLowerCase();
+                  const archivedAt = j?.archived_at ?? j?.archivedAt ?? null;
+                  const reason = String(j?.archive_reason ?? j?.archiveReason ?? "").toLowerCase();
+                  // Active = not archived (covers deleted & transferred which are archived with reason)
+                  if (status === "archived") return false;
+                  if (archivedAt) return false;
+                  if (reason === "transfer") return false;
+                  return true;
+                })
+              : [];
+            setJobs(activeOnly);
+          }
+        } catch (jobError) {
+          console.error("Error fetching jobs:", jobError);
+        }
+      } catch (error) {
+        console.error("Error fetching lookup data:", error);
+      } finally {
+        setIsLoadingLookups(false);
+      }
+    };
+
+    fetchLookups();
+  }, []);
+
+  // Fetch internal users for owner filter
+  useEffect(() => {
+    const fetchInternalUsers = async () => {
+      try {
+        const token = document.cookie.replace(
+          /(?:(?:^|.*;\s*)token\s*=\s*([^;]*).*$)|^.*$/,
+          "$1",
+        );
+        const res = await fetch("/api/users/active", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const list = data.users || data.data || [];
+          setInternalUsers(
+            Array.isArray(list)
+              ? list.map((u: any) => ({
+                  id: u.id,
+                  name: u.name || u.full_name || u.email || `User ${u.id}`,
+                  email: u.email,
+                }))
+              : [],
+          );
+        }
+      } catch (e) {
+        console.error("Error fetching internal users:", e);
+      }
+    };
+    fetchInternalUsers();
+  }, []);
+
+  // Fetch appointments from API
+  const fetchAppointments = async () => {
+    setIsLoadingAppointments(true);
+    try {
+      const token = document.cookie.replace(
+        /(?:(?:^|.*;\s*)token\s*=\s*([^;]*).*$)|^.*$/,
+        "$1",
+      );
+      const startOfMonth = new Date(
+        currentMonth.getFullYear(),
+        currentMonth.getMonth(),
+        1,
+      );
+      const endOfMonth = new Date(
+        currentMonth.getFullYear(),
+        currentMonth.getMonth() + 1,
+        0,
+      );
+
+      const queryParams = new URLSearchParams({
+        startDate: startOfMonth.toISOString().split("T")[0],
+        endDate: endOfMonth.toISOString().split("T")[0],
+      });
+      if (ownerFilter.length > 0) {
+        queryParams.set("ownerId", ownerFilter.join(","));
+      }
+      queryParams.set("_ts", String(Date.now()));
+
+      const response = await fetch(
+        `/api/planner/appointments?${queryParams.toString()}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+          cache: "no-store",
+        },
+      );
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        let errorMessage = "Failed to fetch appointments";
+        try {
+          const errorData = JSON.parse(errorText);
+          errorMessage = errorData.message || errorMessage;
+        } catch (e) {
+          // If response is not JSON, use status text
+          errorMessage = `HTTP ${response.status}: ${response.statusText || errorMessage}`;
+        }
+        throw new Error(errorMessage);
+      }
+
+      const responseText = await response.text();
+      let data;
+      try {
+        data = JSON.parse(responseText);
+      } catch (parseError) {
+        console.error("Error parsing appointments response:", parseError);
+        console.error("Response text:", responseText);
+        throw new Error("Invalid response from server");
+      }
+
+      // Ensure we have valid data
+      if (!data || (!data.appointments && !data.data && !Array.isArray(data))) {
+        console.warn("Unexpected appointments response format:", data);
+        setAppointments([]);
+        return;
+      }
+
+      const appointmentsList = Array.isArray(data.appointments)
+        ? data.appointments
+        : Array.isArray(data.data)
+          ? data.data
+          : Array.isArray(data)
+            ? data
+            : [];
+
+      // Map API response to Appointment interface
+      const mappedAppointments: Appointment[] = appointmentsList.map(
+        (apt: any) => {
+          try {
+            // Handle time field - PostgreSQL TIME returns "HH:MM:SS" format
+            let timeValue = apt.start_time || apt.time || "";
+            if (timeValue && typeof timeValue === "string") {
+              // If it's a full datetime, extract time part
+              if (timeValue.includes("T") || timeValue.includes(" ")) {
+                const parts = timeValue.split(/[T ]/);
+                if (parts.length > 1) {
+                  timeValue = parts[1].substring(0, 8); // Extract HH:MM:SS
+                }
+              }
+              // If it's "HH:MM:SS", convert to "HH:MM" for display
+              if (timeValue.length === 8 && timeValue.includes(":")) {
+                timeValue = timeValue.substring(0, 5); // HH:MM
+              }
+            }
+
+            // Determine participant display name based on participant_type
+            let participantName = "";
+            if (apt.participant_type && apt.participant_id) {
+              // We'll fetch participant names separately, but store the info
+              participantName = apt.participant_name || apt.client || "";
+            } else {
+              // Fallback to client field if participant info not available
+              participantName = apt.client || apt.organization_name || "";
+            }
+
+            // Determine job display name
+            const jobDisplayName =
+              apt.job ||
+              apt.job_title ||
+              (apt.job_id ? `Job #${apt.job_id}` : "");
+
+            return {
+              id: apt.id || 0,
+              date: apt.date || apt.start_date || "",
+              time: timeValue,
+              start_time: apt.start_time || apt.time || "",
+              type: apt.type || "",
+              participant_type: apt.participant_type || null,
+              participant_id: apt.participant_id || null,
+              job_id: apt.job_id || null,
+              client: participantName, // Use participant name as client display
+              job: jobDisplayName,
+              references: Array.isArray(apt.references) ? apt.references : [],
+              owner: apt.owner || apt.created_by_name || apt.owner_name || "",
+              owner_id: apt.owner_id || null,
+              description: apt.description || "",
+              location: apt.location || "",
+              duration: apt.duration || 30,
+              status: apt.status || "scheduled",
+              zoom_meeting_id: apt.zoom_meeting_id || null,
+              zoom_join_url: apt.zoom_join_url || null,
+              zoom_start_url: apt.zoom_start_url || null,
+              zoom_password: apt.zoom_password || null,
+              document_urls: Array.isArray(apt.document_urls)
+                ? apt.document_urls
+                : Array.isArray(apt.documentUrls)
+                  ? apt.documentUrls
+                  : [],
+            };
+          } catch (mapError) {
+            console.error("Error mapping appointment:", mapError, apt);
+            // Return a minimal valid appointment object
+            return {
+              id: apt.id || 0,
+              date: apt.date || "",
+              time: apt.start_time || apt.time || "",
+              start_time: apt.start_time || apt.time || "",
+              type: apt.type || "",
+              client: "",
+              job: "",
+              references: [],
+              owner: "",
+              duration: 30,
+              status: "scheduled",
+            };
+          }
+        },
+      );
+
+      setAppointments(mappedAppointments);
+    } catch (err) {
+      console.error("Error fetching appointments:", err);
+      toast.error("Failed to load appointments. Please try again.");
+      setAppointments([]);
+    } finally {
+      setIsLoadingAppointments(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchAppointments();
+  }, [currentMonth, ownerFilter]);
+
+  // Reset current page when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [columnFilters, columnSorts]);
+
+  // Local date helpers (avoid timezone shifts from `new Date("YYYY-MM-DD")`)
+  const toYmdLocal = (date: Date): string => {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, "0");
+    const d = String(date.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  };
+
+  const toYmdFromUnknown = (dateStr: string): string => {
+    if (!dateStr) return "";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr;
+    const dt = new Date(dateStr);
+    if (Number.isNaN(dt.getTime())) return dateStr;
+    return toYmdLocal(dt);
+  };
+
+  // Calendar data generation
+  const getCalendarData = (currentMonth: Date) => {
+    const year = currentMonth.getFullYear();
+    const month = currentMonth.getMonth();
+
+    const firstDay = new Date(year, month, 1);
+    const firstDayOfWeek = firstDay.getDay();
+
+    const lastDay = new Date(year, month + 1, 0);
+    const daysInMonth = lastDay.getDate();
+
+    const daysFromPrevMonth = firstDayOfWeek;
+    const prevMonth = new Date(year, month, 0);
+    const daysInPrevMonth = prevMonth.getDate();
+
+    const calendarData: Array<{
+      day: number;
+      appointmentCount: number;
+      isCurrentMonth: boolean;
+      isToday: boolean;
+      date: Date;
+    }> = [];
+
+    // Helper function to normalize date strings for comparison
+    const normalizeDateString = (date: Date): string => {
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, "0");
+      const day = String(date.getDate()).padStart(2, "0");
+      return `${year}-${month}-${day}`;
+    };
+
+    // Helper function to normalize appointment date
+    const normalizeAppointmentDate = (dateStr: string): string => {
+      return toYmdFromUnknown(dateStr);
+    };
+
+    // Add days from previous month
+    for (let i = daysFromPrevMonth - 1; i >= 0; i--) {
+      const day = daysInPrevMonth - i;
+      const date = new Date(year, month - 1, day);
+      const dateString = normalizeDateString(date);
+      const dayAppointments = appointments.filter((apt) => {
+        const aptDateStr = normalizeAppointmentDate(apt.date);
+        return aptDateStr === dateString;
+      });
+
+      calendarData.push({
+        day,
+        appointmentCount: dayAppointments.length,
+        isCurrentMonth: false,
+        isToday: false,
+        date,
+      });
+    }
+
+    // Add days from current month
+    const today = new Date();
+    for (let day = 1; day <= daysInMonth; day++) {
+      const date = new Date(year, month, day);
+      const dateString = normalizeDateString(date);
+      const dayAppointments = appointments.filter((apt) => {
+        const aptDateStr = normalizeAppointmentDate(apt.date);
+        return aptDateStr === dateString;
+      });
+      const isToday =
+        date.getDate() === today.getDate() &&
+        date.getMonth() === today.getMonth() &&
+        date.getFullYear() === today.getFullYear();
+
+      calendarData.push({
+        day,
+        appointmentCount: dayAppointments.length,
+        isCurrentMonth: true,
+        isToday,
+        date,
+      });
+    }
+
+    // Add days from next month to fill the grid (42 days total for 6 weeks)
+    const remainingDays = 42 - calendarData.length;
+    for (let day = 1; day <= remainingDays; day++) {
+      const date = new Date(year, month + 1, day);
+      const dateString = normalizeDateString(date);
+      const dayAppointments = appointments.filter((apt) => {
+        const aptDateStr = normalizeAppointmentDate(apt.date);
+        return aptDateStr === dateString;
+      });
+
+      calendarData.push({
+        day,
+        appointmentCount: dayAppointments.length,
+        isCurrentMonth: false,
+        isToday: false,
+        date,
+      });
+    }
+
+    return calendarData;
+  };
+
+  const calendarData = getCalendarData(currentMonth);
+  const selectedDayAppointments = appointments.filter((apt) => {
+    return toYmdFromUnknown(apt.date) === toYmdLocal(selectedDate);
+  });
+
+  // Column info helper
+  const getColumnInfo = (key: string) => {
+    const columnMap: Record<
+      string,
+      { filterType: "text" | "select" | "number"; label: string }
+    > = {
+      date: { filterType: "text", label: "Date" },
+      time: { filterType: "text", label: "Time" },
+      type: { filterType: "select", label: "Type" },
+      status: { filterType: "select", label: "Status" },
+      participant: { filterType: "text", label: "Participant" },
+      job: { filterType: "text", label: "Job" },
+      duration: { filterType: "number", label: "Duration" },
+      zoom: { filterType: "select", label: "Zoom" },
+      documents: { filterType: "select", label: "Docs" },
+    };
+    return columnMap[key];
+  };
+
+  // Helper to map participant_type to RecordType
+  const getParticipantRecordType = (
+    participantType: string | null | undefined,
+  ): string | null => {
+    if (!participantType) return null;
+    const typeMap: Record<string, string> = {
+      job_seeker: "job-seeker",
+      hiring_manager: "hiring-manager",
+      organization: "organization",
+      internal: "owner", // Internal users might not be clickable
+    };
+    return typeMap[participantType] || null;
+  };
+
+  // Column value getter
+  const getColumnValue = (apt: Appointment, key: string): any => {
+    switch (key) {
+      case "date":
+        return new Date(apt.date).toLocaleDateString();
+      case "time":
+        return apt.time || "—";
+      case "type":
+        return apt.type || "—";
+      case "status":
+        return apt.status || "—";
+      case "participant":
+        return apt.client || "—";
+      case "job":
+        return apt.job || "—";
+      case "duration":
+        return apt.duration ? `${apt.duration} min` : "—";
+      case "zoom":
+        return apt.zoom_join_url ? "Yes" : "No";
+      case "documents":
+        return apt.document_urls && apt.document_urls.length > 0 ? "Yes" : "No";
+      default:
+        return "—";
+    }
+  };
+
+  // Filter and sort selected day appointments for Month view table
+  const filteredAndSortedSelectedDayAppointments = useMemo(() => {
+    let filtered = [...selectedDayAppointments];
+
+    // Apply filters
+    Object.entries(monthTableColumnFilters).forEach(([key, filterValue]) => {
+      if (!filterValue) return;
+      filtered = filtered.filter((apt) => {
+        const value = String(getColumnValue(apt, key)).toLowerCase();
+        return value.includes(filterValue.toLowerCase());
+      });
+    });
+
+    // Apply sorts
+    const sortKeys = Object.keys(monthTableColumnSorts).filter(
+      (key) => monthTableColumnSorts[key] !== null,
+    );
+    if (sortKeys.length > 0) {
+      filtered.sort((a, b) => {
+        for (const key of sortKeys) {
+          const direction = monthTableColumnSorts[key];
+          if (!direction) continue;
+          const aVal = getColumnValue(a, key);
+          const bVal = getColumnValue(b, key);
+          let comparison = 0;
+          if (typeof aVal === "string" && typeof bVal === "string") {
+            comparison = aVal.localeCompare(bVal);
+          } else {
+            comparison = aVal < bVal ? -1 : aVal > bVal ? 1 : 0;
+          }
+          if (comparison !== 0) {
+            return direction === "asc" ? comparison : -comparison;
+          }
+        }
+        return 0;
+      });
+    } else {
+      // Default sort by time if no sort is applied
+      filtered.sort((a, b) => {
+        const timeA = a.time || "";
+        const timeB = b.time || "";
+        return timeA.localeCompare(timeB);
+      });
+    }
+
+    return filtered;
+  }, [selectedDayAppointments, monthTableColumnFilters, monthTableColumnSorts]);
+
+  // Handle month table column drag end
+  const handleMonthTableColumnDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (over && active.id !== over.id) {
+      setMonthTableColumnFields((items) => {
+        const oldIndex = items.indexOf(active.id as string);
+        const newIndex = items.indexOf(over.id as string);
+        return arrayMove(items, oldIndex, newIndex);
+      });
+    }
+  };
+
+  // Handle month table column sort
+  const handleMonthTableColumnSort = (key: string) => {
+    setMonthTableColumnSorts((prev) => {
+      const current = prev[key];
+      let next: ColumnSortState = null;
+      if (current === null) next = "asc";
+      else if (current === "asc") next = "desc";
+      else next = null;
+      return { ...prev, [key]: next };
+    });
+  };
+
+  // Handle month table column filter
+  const handleMonthTableColumnFilter = (key: string, value: string) => {
+    setMonthTableColumnFilters((prev) => ({
+      ...prev,
+      [key]: value || null,
+    }));
+  };
+
+  // Reset month table page when filters change
+  useEffect(() => {
+    setMonthTableCurrentPage(1);
+  }, [monthTableColumnFilters, monthTableColumnSorts, selectedDate]);
+
+  const monthNames = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+  ];
+
+  const dayNames = [
+    "SUNDAY",
+    "MONDAY",
+    "TUESDAY",
+    "WEDNESDAY",
+    "THURSDAY",
+    "FRIDAY",
+    "SATURDAY",
+  ];
+
+  const navigateMonth = (direction: "prev" | "next") => {
+    setCurrentMonth((prev) => {
+      const newMonth = new Date(prev);
+      if (direction === "prev") {
+        newMonth.setMonth(prev.getMonth() - 1);
+      } else {
+        newMonth.setMonth(prev.getMonth() + 1);
+      }
+      return newMonth;
+    });
+  };
+
+  const totalAppointments = calendarData.reduce(
+    (sum, day) => sum + day.appointmentCount,
+    0,
+  );
+
+  // Handle Add Appointment
+  const handleAddClick = () => {
+    const today = new Date();
+    setAppointmentForm({
+      date: today.toISOString().split("T")[0],
+      time: "",
+      type: "",
+      participant_type: "",
+      participant_id: "",
+      job_id: "",
+      description: "",
+      duration: 30,
+      sendInvites: true,
+    });
+    setInvitees([]);
+    setAppointmentDocuments([]);
+    setShowAddModal(true);
+  };
+
+  const closeAddModal = () => {
+    // Only hide the modal here; do not clear pendingApplicationStatusUpdate.
+    // That ref is intentionally cleared after any follow-up status PATCH logic
+    // in handleSaveAppointment's finally block.
+    setShowAddModal(false);
+  };
+
+  // Handle Save Appointment
+  const handleSaveAppointment = async () => {
+    if (
+      !appointmentForm.date ||
+      !appointmentForm.time ||
+      !appointmentForm.type
+    ) {
+      toast.error("Please fill in all required fields (Date, Time, Type)");
+      return;
+    }
+
+    setIsSavingAppointment(true);
+    try {
+      const token = document.cookie.replace(
+        /(?:(?:^|.*;\s*)token\s*=\s*([^;]*).*$)|^.*$/,
+        "$1",
+      );
+
+      // Safely parse participant_id and job_id
+      const participantId =
+        appointmentForm.participant_id &&
+        appointmentForm.participant_id.trim() !== ""
+          ? parseInt(appointmentForm.participant_id, 10)
+          : null;
+
+      const jobId =
+        appointmentForm.job_id && appointmentForm.job_id.trim() !== ""
+          ? parseInt(appointmentForm.job_id, 10)
+          : null;
+
+      // Validate parsed values
+      if (
+        appointmentForm.participant_id &&
+        (isNaN(participantId!) || participantId! <= 0)
+      ) {
+        toast.error("Invalid participant selected");
+        setIsSavingAppointment(false);
+        return;
+      }
+
+      if (appointmentForm.job_id && (isNaN(jobId!) || jobId! <= 0)) {
+        toast.error("Invalid job selected");
+        setIsSavingAppointment(false);
+        return;
+      }
+
+      // Resolve invitee emails before create so the backend can send invite emails
+      const apiUrl = (
+        process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8080"
+      ).replace(/\/$/, "");
+      const byId = (list: any[], id: number) =>
+        list.find((r: any) => Number(r.id) === Number(id));
+      const fetchEmailForInvitee = async (
+        type: "job_seeker" | "hiring_manager" | "internal",
+        id: number
+      ): Promise<string | undefined> => {
+        if (type === "internal") {
+          const u = byId(internalUsers, id);
+          return u?.email;
+        }
+        try {
+          const path =
+            type === "job_seeker"
+              ? `${apiUrl}/api/job-seekers/${id}`
+              : `${apiUrl}/api/hiring-managers/${id}`;
+          const res = await fetch(path, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (res.ok) {
+            const data = await res.json();
+            const record = data.jobSeeker ?? data.hiringManager ?? data;
+            return record?.email;
+          }
+        } catch (_) {
+          /* ignore */
+        }
+        return undefined;
+      };
+      const inviteeEmailsForBackend: string[] = [];
+      if (appointmentForm.sendInvites) {
+        const seen = new Set<string>();
+        const add = (email: string | undefined) => {
+          if (email && email.trim() && !seen.has(email.trim().toLowerCase())) {
+            seen.add(email.trim().toLowerCase());
+            inviteeEmailsForBackend.push(email.trim());
+          }
+        };
+        for (const { type, id } of invitees) {
+          if (type === "job_seeker") {
+            const js = byId(jobSeekers, id);
+            add(js?.email ?? (await fetchEmailForInvitee("job_seeker", id)));
+          } else if (type === "hiring_manager") {
+            const hm = byId(hiringManagers, id);
+            add(hm?.email ?? (await fetchEmailForInvitee("hiring_manager", id)));
+          } else if (type === "internal") {
+            const u = byId(internalUsers, id);
+            add(u?.email);
+          }
+        }
+        if (participantId && appointmentForm.participant_type) {
+          if (appointmentForm.participant_type === "job_seeker") {
+            const js = byId(jobSeekers, participantId);
+            add(
+              js?.email ??
+                (await fetchEmailForInvitee("job_seeker", participantId))
+            );
+          } else if (appointmentForm.participant_type === "hiring_manager") {
+            const hm = byId(hiringManagers, participantId);
+            add(
+              hm?.email ??
+                (await fetchEmailForInvitee("hiring_manager", participantId))
+            );
+          }
+        }
+      }
+
+      const requestBody: Record<string, unknown> = {
+        date: appointmentForm.date,
+        time: appointmentForm.time,
+        type: appointmentForm.type,
+        participant_type:
+          appointmentForm.participant_type &&
+          appointmentForm.participant_type.trim() !== ""
+            ? appointmentForm.participant_type
+            : null,
+        participant_id: participantId,
+        job_id: jobId,
+        description:
+          appointmentForm.description &&
+          appointmentForm.description.trim() !== ""
+            ? appointmentForm.description
+            : null,
+        duration: appointmentForm.duration || 30,
+        sendInvites: appointmentForm.sendInvites ?? false,
+      };
+      if (appointmentForm.sendInvites && inviteeEmailsForBackend.length > 0) {
+        requestBody.invitee_emails = inviteeEmailsForBackend;
+      }
+
+      const hasDocs = appointmentDocuments.length > 0;
+      const response = await fetch("/api/planner/appointments", {
+        method: "POST",
+        headers: hasDocs
+          ? {
+              Authorization: `Bearer ${token}`,
+            }
+          : {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`,
+            },
+        body: hasDocs
+          ? (() => {
+              const fd = new FormData();
+              Object.entries(requestBody).forEach(([k, v]) => {
+                if (v === undefined || v === null) return;
+                if (Array.isArray(v) || typeof v === "object") {
+                  fd.append(k, JSON.stringify(v));
+                } else {
+                  fd.append(k, String(v));
+                }
+              });
+              for (const f of appointmentDocuments) {
+                fd.append("documents", f);
+              }
+              return fd;
+            })()
+          : JSON.stringify(requestBody),
+      });
+
+      const responseText = await response.text();
+      let responseData;
+
+      try {
+        responseData = JSON.parse(responseText);
+      } catch (parseError) {
+        console.error("Error parsing response:", parseError);
+        console.error("Response text:", responseText);
+        throw new Error("Invalid response from server");
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          responseData.message ||
+            responseData.error ||
+            "Failed to create appointment",
+        );
+      }
+
+      toast.success("Appointment created successfully!");
+      closeAddModal();
+      // Update selected day to the appointment date so it shows immediately in Month view table
+      if (appointmentForm.date) {
+        const d = new Date(appointmentForm.date);
+        if (!Number.isNaN(d.getTime())) setSelectedDate(d);
+      }
+
+      // If user chose to send calendar invites and Office 365 is authenticated, send invite to all invitees + primary participant
+      if (appointmentForm.sendInvites && isOffice365Authenticated()) {
+        const apiUrl = (
+          process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8080"
+        ).replace(/\/$/, "");
+        const seen = new Set<string>();
+        const attendeeEmails: string[] = [];
+        const addEmail = (email: string | undefined) => {
+          if (email && email.trim() && !seen.has(email.trim().toLowerCase())) {
+            seen.add(email.trim().toLowerCase());
+            attendeeEmails.push(email.trim());
+          }
+        };
+        // Helper: resolve email from list with coerced id (API may return number or string)
+        const byId = (list: any[], id: number) =>
+          list.find((r: any) => Number(r.id) === Number(id));
+        // Helper: fetch email from API when not in list (e.g. list pagination or missing field)
+        const fetchEmailForInvitee = async (
+          type: "job_seeker" | "hiring_manager" | "internal",
+          id: number
+        ): Promise<string | undefined> => {
+          if (type === "internal") {
+            const u = byId(internalUsers, id);
+            return u?.email;
+          }
+          try {
+            const path =
+              type === "job_seeker"
+                ? `${apiUrl}/api/job-seekers/${id}`
+                : `${apiUrl}/api/hiring-managers/${id}`;
+            const res = await fetch(path, {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            if (res.ok) {
+              const data = await res.json();
+              const record = data.jobSeeker ?? data.hiringManager ?? data;
+              return record?.email;
+            }
+          } catch (_) {
+            /* ignore */
+          }
+          return undefined;
+        };
+        // Add emails from invitees (Job Seekers, Hiring Managers, Internal users)
+        for (const { type, id } of invitees) {
+          if (type === "job_seeker") {
+            const js = byId(jobSeekers, id);
+            addEmail(js?.email ?? (await fetchEmailForInvitee("job_seeker", id)));
+          } else if (type === "hiring_manager") {
+            const hm = byId(hiringManagers, id);
+            addEmail(
+              hm?.email ?? (await fetchEmailForInvitee("hiring_manager", id))
+            );
+          } else if (type === "internal") {
+            const u = byId(internalUsers, id);
+            addEmail(u?.email);
+          }
+        }
+        // Add primary participant email if set and not already in invitees
+        if (participantId && appointmentForm.participant_type) {
+          if (appointmentForm.participant_type === "job_seeker") {
+            const js = byId(jobSeekers, participantId);
+            addEmail(
+              js?.email ??
+                (await fetchEmailForInvitee("job_seeker", participantId))
+            );
+          } else if (appointmentForm.participant_type === "hiring_manager") {
+            const hm = byId(hiringManagers, participantId);
+            addEmail(
+              hm?.email ??
+                (await fetchEmailForInvitee("hiring_manager", participantId))
+            );
+          }
+        }
+        if (attendeeEmails.length > 0) {
+          try {
+            const duration = appointmentForm.duration || 30;
+            const start = new Date(
+              `${appointmentForm.date}T${appointmentForm.time}`,
+            );
+            const end = new Date(start.getTime() + duration * 60 * 1000);
+            const event: CalendarEvent = {
+              subject: appointmentForm.type || "Appointment",
+              start: {
+                dateTime: start.toISOString(),
+                timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+              },
+              end: {
+                dateTime: end.toISOString(),
+                timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+              },
+              body: appointmentForm.description
+                ? { contentType: "text", content: appointmentForm.description }
+                : undefined,
+            };
+            await sendCalendarInvite(event, attendeeEmails);
+            toast.success("Calendar invite sent to participant(s).");
+          } catch (inviteErr) {
+            console.error("Error sending calendar invite:", inviteErr);
+            toast.error(
+              "Appointment created but calendar invite could not be sent.",
+            );
+          }
+        } else if (
+          invitees.length > 0 ||
+          (participantId && appointmentForm.participant_type)
+        ) {
+          toast.warning(
+            "No valid email addresses could be found for the selected invitees. Calendar invites were not sent.",
+          );
+        }
+      }
+
+      // If we opened from "Interview" flow (jobs applied / candidate flow), update application status to Interview
+      const pending = pendingApplicationStatusUpdate.current;
+      if (pending?.candidateId && pending?.applicationId) {
+        try {
+          const patchRes = await fetch(
+            `/api/job-seekers/${pending.candidateId}/applications/${pending.applicationId}`,
+            {
+              method: "PATCH",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`,
+              },
+              body: JSON.stringify({ status: "Interview" }),
+            },
+          );
+          const patchData = await patchRes.json().catch(() => ({}));
+          if (patchRes.ok) {
+            toast.success("Application status set to Interview.");
+          } else {
+            toast.error(
+              patchData.message ||
+                "Appointment created but failed to update application status.",
+            );
+          }
+        } catch (patchErr) {
+          console.error(
+            "Error updating application status after appointment:",
+            patchErr,
+          );
+          toast.error(
+            "Appointment created but failed to update application status.",
+          );
+        } finally {
+          pendingApplicationStatusUpdate.current = null;
+        }
+      }
+
+      // Reset form
+      setAppointmentForm({
+        date: "",
+        time: "",
+        type: "",
+        participant_type: "",
+        participant_id: "",
+        job_id: "",
+        description: "",
+        duration: 30,
+        sendInvites: true,
+      });
+      setInvitees([]);
+      setAppointmentDocuments([]);
+
+      fetchAppointments();
+    } catch (err) {
+      console.error("Error saving appointment:", err);
+      const errorMessage =
+        err instanceof Error ? err.message : "Failed to save appointment";
+      toast.error(errorMessage);
+    } finally {
+      setIsSavingAppointment(false);
+    }
+  };
+
+  // Handle Print
+  const handlePrint = () => {
+    window.print();
+  };
+
+  // Handle Close
+  const handleClose = () => {
+    router.push("/dashboard");
+  };
+
+  // Handle Pin Toggle (same as other modules: adds/removes tab in DashboardNav)
+  const handlePinToggle = () => {
+    const res = togglePinnedRecord({
+      key: PLANNER_PINNED_KEY,
+      label: "Planner",
+      url: "/dashboard/planner",
+    });
+    if (res.action === "limit") {
+      toast.info("Maximum 10 pinned records reached");
+    }
+  };
+
+  // Get appointments for List view (sorted chronologically)
+  // Reset current page when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [columnFilters, columnSorts]);
+
+  const getListAppointments = () => {
+    const sorted = [...appointments].sort((a, b) => {
+      const dateA = new Date(`${a.date}T${a.time}`);
+      const dateB = new Date(`${b.date}T${b.time}`);
+      return dateA.getTime() - dateB.getTime();
+    });
+    return sorted.slice(
+      (currentPage - 1) * itemsPerPage,
+      currentPage * itemsPerPage,
+    );
+  };
+
+  // Render Week View
+  const renderWeekView = () => {
+    const startOfWeek = new Date(selectedDate);
+    const day = startOfWeek.getDay();
+    startOfWeek.setDate(startOfWeek.getDate() - day);
+
+    const weekDays = [];
+    for (let i = 0; i < 7; i++) {
+      const date = new Date(startOfWeek);
+      date.setDate(startOfWeek.getDate() + i);
+      weekDays.push(date);
+    }
+
+    return (
+      <div className="px-6 py-6">
+        <div className="grid grid-cols-7 gap-1">
+          {weekDays.map((date, index) => {
+            const dateString = date.toISOString().split("T")[0];
+            const dayAppointments = appointments
+              .filter((apt) => apt.date === dateString)
+              .sort((a, b) => (a.time || "").localeCompare(b.time || ""));
+            const isToday = date.toDateString() === new Date().toDateString();
+
+            return (
+              <div
+                key={index}
+                className={`min-h-[400px] border border-gray-200 p-2 ${isToday ? "bg-blue-50 border-blue-300" : ""}`}
+              >
+                <div
+                  className={`text-sm font-medium mb-2 ${isToday ? "text-blue-600" : "text-gray-700"}`}
+                >
+                  {dayNames[date.getDay()]}
+                </div>
+                <div
+                  className={`text-lg font-bold mb-2 ${isToday ? "text-blue-600" : "text-gray-900"}`}
+                >
+                  {date.getDate()}
+                </div>
+                <div className="space-y-1">
+                  {dayAppointments.length === 0 ? (
+                    <div className="text-xs text-gray-400 text-center py-2">
+                      No appointments
+                    </div>
+                  ) : (
+                    dayAppointments.map((apt) => (
+                      <div
+                        key={apt.id}
+                        className="p-2 bg-blue-100 rounded text-xs hover:bg-blue-200 transition-colors"
+                      >
+                        <div className="font-medium text-gray-900">
+                          {apt.time || "—"}
+                        </div>
+                        <div className="text-gray-700 capitalize">
+                          {apt.type || "—"}
+                        </div>
+                        {apt.client && (
+                          <div
+                            className="text-gray-600 truncate"
+                            title={apt.client}
+                          >
+                            {apt.client}
+                          </div>
+                        )}
+                        {apt.status && (
+                          <div
+                            className={`text-[10px] mt-1 px-1 rounded inline-block ${
+                              apt.status === "live"
+                                ? "bg-red-500 text-white"
+                                : apt.status === "completed"
+                                  ? "bg-green-500 text-white"
+                                  : "bg-gray-200 text-gray-700"
+                            }`}
+                          >
+                            {apt.status}
+                          </div>
+                        )}
+                        {apt.zoom_join_url && (
+                          <a
+                            href={apt.zoom_join_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-blue-600 hover:text-blue-800 text-[10px] underline mt-1 block"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            Join Zoom
+                          </a>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  // Render Day View
+  const renderDayView = () => {
+    const dateString = selectedDate.toISOString().split("T")[0];
+    const dayAppointments = appointments
+      .filter((apt) => apt.date === dateString)
+      .sort((a, b) => (a.time || "").localeCompare(b.time || ""));
+    const isToday = selectedDate.toDateString() === new Date().toDateString();
+
+    return (
+      <div className="px-6 py-6">
+        <div
+          className={`border border-gray-200 p-4 rounded ${isToday ? "bg-blue-50 border-blue-300" : ""}`}
+        >
+          <div
+            className={`text-lg font-bold mb-4 ${isToday ? "text-blue-600" : "text-gray-900"}`}
+          >
+            {dayNames[selectedDate.getDay()]},{" "}
+            {monthNames[selectedDate.getMonth()]} {selectedDate.getDate()},{" "}
+            {selectedDate.getFullYear()}
+          </div>
+          <div className="space-y-3">
+            {dayAppointments.length === 0 ? (
+              <div className="text-gray-500 text-center py-8">
+                No appointments for this day
+              </div>
+            ) : (
+              dayAppointments.map((apt) => (
+                <div
+                  key={apt.id}
+                  className="border border-gray-200 p-4 rounded bg-white shadow-sm hover:shadow-md transition-shadow"
+                >
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-3">
+                      <div className="font-medium text-lg text-gray-900">
+                        {apt.time || "—"}
+                      </div>
+                      <div className="text-gray-600 capitalize">
+                        {apt.type || "—"}
+                      </div>
+                    </div>
+                    {apt.status && (
+                      <span
+                        className={`px-2 py-1 rounded text-xs font-medium ${
+                          apt.status === "live"
+                            ? "bg-red-100 text-red-800"
+                            : apt.status === "completed"
+                              ? "bg-green-100 text-green-800"
+                              : "bg-gray-100 text-gray-800"
+                        }`}
+                      >
+                        {apt.status.charAt(0).toUpperCase() +
+                          apt.status.slice(1)}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 text-sm">
+                    {apt.client && (
+                      <div>
+                        <span className="text-gray-500">Participant:</span>
+                        <span className="ml-2 text-gray-900">{apt.client}</span>
+                      </div>
+                    )}
+                    {apt.job && (
+                      <div>
+                        <span className="text-gray-500">Job:</span>
+                        <span className="ml-2 text-gray-900">{apt.job}</span>
+                      </div>
+                    )}
+                    {apt.duration && (
+                      <div>
+                        <span className="text-gray-500">Duration:</span>
+                        <span className="ml-2 text-gray-900">
+                          {apt.duration} minutes
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {apt.description && (
+                    <div className="text-gray-600 mt-3 p-2 bg-gray-50 rounded">
+                      {apt.description}
+                    </div>
+                  )}
+
+                  {apt.zoom_join_url && (
+                    <div className="mt-3 flex gap-2">
+                      <a
+                        href={apt.zoom_join_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 transition-colors"
+                      >
+                        Join Zoom Meeting
+                      </a>
+                      {apt.zoom_start_url && (
+                        <a
+                          href={apt.zoom_start_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="px-3 py-1 bg-blue-500 text-white rounded text-sm hover:bg-blue-600 transition-colors"
+                        >
+                          Start Meeting (Host)
+                        </a>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // Handle column drag end
+  const handleColumnDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (over && active.id !== over.id) {
+      setColumnFields((items) => {
+        const oldIndex = items.indexOf(active.id as string);
+        const newIndex = items.indexOf(over.id as string);
+        return arrayMove(items, oldIndex, newIndex);
+      });
+    }
+  };
+
+  // Handle column sort
+  const handleColumnSort = (key: string) => {
+    setColumnSorts((prev) => {
+      const current = prev[key];
+      let next: ColumnSortState = null;
+      if (current === null) next = "asc";
+      else if (current === "asc") next = "desc";
+      else next = null;
+      return { ...prev, [key]: next };
+    });
+  };
+
+  // Handle column filter
+  const handleColumnFilter = (key: string, value: string) => {
+    setColumnFilters((prev) => ({
+      ...prev,
+      [key]: value || null,
+    }));
+  };
+
+  // Filter and sort appointments
+  const filteredAndSortedAppointments = useMemo(() => {
+    let filtered = [...appointments];
+
+    // When opened from dashboard with date=, show only that day in List
+    if (listViewFilterDate) {
+      const target = listViewFilterDate;
+      filtered = filtered.filter((apt) => {
+        if (!apt.date) return false;
+        const aptDate = new Date(apt.date);
+        const y = aptDate.getFullYear();
+        const m = String(aptDate.getMonth() + 1).padStart(2, "0");
+        const d = String(aptDate.getDate()).padStart(2, "0");
+        return `${y}-${m}-${d}` === target;
+      });
+    }
+
+    // Apply filters
+    Object.entries(columnFilters).forEach(([key, filterValue]) => {
+      if (!filterValue) return;
+      filtered = filtered.filter((apt) => {
+        const value = String(getColumnValue(apt, key)).toLowerCase();
+        return value.includes(filterValue.toLowerCase());
+      });
+    });
+
+    // Apply sorts
+    const sortKeys = Object.keys(columnSorts).filter(
+      (key) => columnSorts[key] !== null,
+    );
+    if (sortKeys.length > 0) {
+      filtered.sort((a, b) => {
+        for (const key of sortKeys) {
+          const direction = columnSorts[key];
+          if (!direction) continue;
+          const aVal = getColumnValue(a, key);
+          const bVal = getColumnValue(b, key);
+          let comparison = 0;
+          if (typeof aVal === "string" && typeof bVal === "string") {
+            comparison = aVal.localeCompare(bVal);
+          } else {
+            comparison = aVal < bVal ? -1 : aVal > bVal ? 1 : 0;
+          }
+          if (comparison !== 0) {
+            return direction === "asc" ? comparison : -comparison;
+          }
+        }
+        return 0;
+      });
+    }
+
+    return filtered;
+  }, [appointments, listViewFilterDate, columnFilters, columnSorts]);
+
+  // Render List View
+  const renderListView = () => {
+    const startIndex = (currentPage - 1) * itemsPerPage;
+    const endIndex = startIndex + itemsPerPage;
+    const paginatedAppointments = filteredAndSortedAppointments.slice(
+      startIndex,
+      endIndex,
+    );
+    const totalPages = Math.ceil(
+      filteredAndSortedAppointments.length / itemsPerPage,
+    );
+    const totalItems = filteredAndSortedAppointments.length;
+
+    const typeOptions = [
+      { label: "Zoom Meeting", value: "zoom" },
+      { label: "Interview", value: "Interview" },
+      { label: "Meeting", value: "Meeting" },
+      { label: "Phone Call", value: "Phone Call" },
+      { label: "Follow-up", value: "Follow-up" },
+      { label: "Assessment", value: "Assessment" },
+      { label: "Other", value: "Other" },
+    ];
+
+    const statusOptions = [
+      { label: "Scheduled", value: "scheduled" },
+      { label: "Live", value: "live" },
+      { label: "Completed", value: "completed" },
+    ];
+
+    const zoomOptions = [
+      { label: "Yes", value: "Yes" },
+      { label: "No", value: "No" },
+    ];
+    const docsOptions = [
+      { label: "Yes", value: "Yes" },
+      { label: "No", value: "No" },
+    ];
+
+    return (
+      <div className="px-6 pb-6">
+        {listViewFilterDate && (
+          <div className="mb-2 flex items-center gap-2">
+            <span className="text-sm text-gray-600">
+              Showing appointments for {listViewFilterDate}
+            </span>
+            <button
+              type="button"
+              onClick={() => setListViewFilterDate(null)}
+              className="text-sm text-blue-600 hover:text-blue-800"
+            >
+              Show all dates
+            </button>
+          </div>
+        )}
+        <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+          <DndContext
+            collisionDetection={closestCenter}
+            onDragEnd={handleColumnDragEnd}
+          >
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <SortableContext
+                      items={columnFields}
+                      strategy={horizontalListSortingStrategy}
+                    >
+                      {columnFields.map((key) => {
+                        const columnInfo = getColumnInfo(key);
+                        if (!columnInfo) return null;
+
+                        return (
+                          <SortableColumnHeader
+                            key={key}
+                            id={key}
+                            columnKey={key}
+                            label={columnInfo.label}
+                            sortState={columnSorts[key] || null}
+                            filterValue={columnFilters[key] || null}
+                            onSort={() => handleColumnSort(key)}
+                            onFilterChange={(value) =>
+                              handleColumnFilter(key, value)
+                            }
+                            filterType={columnInfo.filterType}
+                            filterOptions={
+                              key === "type"
+                                ? typeOptions
+                                : key === "status"
+                                  ? statusOptions
+                                  : key === "zoom"
+                                    ? zoomOptions
+                                    : key === "documents"
+                                      ? docsOptions
+                                    : undefined
+                            }
+                          />
+                        );
+                      })}
+                    </SortableContext>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {paginatedAppointments.length > 0 ? (
+                    paginatedAppointments.map((appointment) => {
+                      const isHighlighted =
+                        appointment.id === highlightAppointmentId;
+                      return (
+                        <tr
+                          key={appointment.id}
+                          ref={
+                            isHighlighted
+                              ? (el) => {
+                                  listViewRowRef.current = el;
+                                }
+                              : undefined
+                          }
+                          className={`hover:bg-gray-50 ${isHighlighted ? "bg-blue-100 ring-1 ring-blue-300" : ""}`}
+                        >
+                          {columnFields.map((key) => {
+                            const value = getColumnValue(appointment, key);
+                            return (
+                              <td
+                                key={key}
+                                className="px-6 py-4 whitespace-nowrap text-sm text-gray-500"
+                              >
+                                {key === "status" && appointment.status ? (
+                                  <span
+                                    className={`px-2 py-1 rounded text-xs font-medium ${
+                                      appointment.status === "live"
+                                        ? "bg-red-100 text-red-800"
+                                        : appointment.status === "completed"
+                                          ? "bg-green-100 text-green-800"
+                                          : "bg-gray-100 text-gray-800"
+                                    }`}
+                                  >
+                                    {appointment.status
+                                      .charAt(0)
+                                      .toUpperCase() +
+                                      appointment.status.slice(1)}
+                                  </span>
+                                ) : key === "participant" &&
+                                  appointment.participant_type &&
+                                  appointment.participant_id ? (
+                                  <RecordNameResolver
+                                    id={appointment.participant_id}
+                                    type={
+                                      getParticipantRecordType(
+                                        appointment.participant_type,
+                                      ) || "organization"
+                                    }
+                                    clickable={
+                                      appointment.participant_type !==
+                                      "internal"
+                                    }
+                                    fallback={appointment.client || "—"}
+                                    className="text-sm"
+                                  />
+                                ) : key === "zoom" &&
+                                  appointment.zoom_join_url ? (
+                                  <a
+                                    href={appointment.zoom_join_url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-blue-600 hover:text-blue-800"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    Join
+                                  </a>
+                                ) : key === "documents" &&
+                                  appointment.document_urls &&
+                                  appointment.document_urls.length > 0 ? (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      const url = appointment.document_urls?.[0];
+                                      if (!url) return;
+                                      const name =
+                                        url.split("/").pop() || "Document";
+                                      setDocumentViewer({ url, name });
+                                    }}
+                                    className="text-blue-600 hover:text-blue-800 underline"
+                                  >
+                                    View
+                                  </button>
+                                ) : key === "type" ? (
+                                  <span className="capitalize">{value}</span>
+                                ) : (
+                                  value
+                                )}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })
+                  ) : (
+                    <tr>
+                      <td
+                        colSpan={columnFields.length}
+                        className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 text-center"
+                      >
+                        {Object.keys(columnFilters).length > 0
+                          ? "No appointments found matching your filters."
+                          : "No appointments found."}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </DndContext>
+        </div>
+
+        {/* Pagination */}
+        {totalPages > 0 && (
+          <div className="px-4 py-3 flex items-center justify-between border-t border-gray-200 sm:px-6 overflow-x-auto min-w-0">
+            <div className="flex-1 flex justify-between sm:hidden">
+              <button
+                onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                disabled={currentPage === 1}
+                className="relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Previous
+              </button>
+              <button
+                onClick={() =>
+                  setCurrentPage((prev) => Math.min(totalPages, prev + 1))
+                }
+                disabled={currentPage === totalPages}
+                className="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Next
+              </button>
+            </div>
+            <div className="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
+              <div>
+                <p className="text-sm text-gray-700">
+                  Showing{" "}
+                  <span className="font-medium">
+                    {totalItems === 0 ? 0 : startIndex + 1}
+                  </span>{" "}
+                  to{" "}
+                  <span className="font-medium">
+                    {Math.min(endIndex, totalItems)}
+                  </span>{" "}
+                  of <span className="font-medium">{totalItems}</span> results
+                </p>
+              </div>
+              {totalPages > 1 && (
+                <div>
+                  <nav
+                    className="relative z-0 inline-flex rounded-md shadow-sm -space-x-px"
+                    aria-label="Pagination"
+                  >
+                    <button
+                      onClick={() =>
+                        setCurrentPage((prev) => Math.max(1, prev - 1))
+                      }
+                      disabled={currentPage === 1}
+                      className="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <span className="sr-only">Previous</span>
+                      <svg
+                        className="h-5 w-5"
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 20 20"
+                        fill="currentColor"
+                        aria-hidden="true"
+                      >
+                        <path
+                          fillRule="evenodd"
+                          d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z"
+                          clipRule="evenodd"
+                        />
+                      </svg>
+                    </button>
+                    {Array.from({ length: totalPages }, (_, i) => i + 1).map(
+                      (page) => {
+                        if (
+                          page === 1 ||
+                          page === totalPages ||
+                          (page >= currentPage - 1 && page <= currentPage + 1)
+                        ) {
+                          return (
+                            <button
+                              key={page}
+                              onClick={() => setCurrentPage(page)}
+                              className={`relative inline-flex items-center px-4 py-2 border text-sm font-medium ${
+                                currentPage === page
+                                  ? "z-10 bg-blue-50 border-blue-500 text-blue-600"
+                                  : "bg-white border-gray-300 text-gray-500 hover:bg-gray-50"
+                              }`}
+                            >
+                              {page}
+                            </button>
+                          );
+                        } else if (
+                          page === currentPage - 2 ||
+                          page === currentPage + 2
+                        ) {
+                          return (
+                            <span
+                              key={page}
+                              className="relative inline-flex items-center px-4 py-2 border border-gray-300 bg-white text-sm font-medium text-gray-700"
+                            >
+                              ...
+                            </span>
+                          );
+                        }
+                        return null;
+                      },
+                    )}
+                    <button
+                      onClick={() =>
+                        setCurrentPage((prev) => Math.min(totalPages, prev + 1))
+                      }
+                      disabled={currentPage === totalPages}
+                      className="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <span className="sr-only">Next</span>
+                      <svg
+                        className="h-5 w-5"
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 20 20"
+                        fill="currentColor"
+                        aria-hidden="true"
+                      >
+                        <path
+                          fillRule="evenodd"
+                          d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z"
+                          clipRule="evenodd"
+                        />
+                      </svg>
+                    </button>
+                  </nav>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <>
+      <style jsx global>{`
+        @media print {
+          .no-print {
+            display: none !important;
+          }
+          .print-only {
+            display: block !important;
+          }
+        }
+      `}</style>
+      <div className="min-h-screen bg-white relative">
+        {/* Header/Navigation Bar */}
+        <div className="bg-white border-b border-gray-200 px-6 py-4 no-print">
+          <div className="flex items-center justify-between">
+            {/* Left Side */}
+            <div className="flex items-center space-x-4">
+              {/* Calendar Icon */}
+              <div className="w-8 h-8 bg-gray-600 rounded flex items-center justify-center">
+                <svg
+                  className="w-5 h-5 text-white"
+                  fill="currentColor"
+                  viewBox="0 0 20 20"
+                >
+                  <path
+                    fillRule="evenodd"
+                    d="M6 2a1 1 0 00-1 1v1H4a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-1V3a1 1 0 10-2 0v1H7V3a1 1 0 00-1-1zm0 5a1 1 0 000 2h8a1 1 0 100-2H6z"
+                    clipRule="evenodd"
+                  />
+                </svg>
+              </div>
+
+              {/* Month Navigation */}
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => navigateMonth("prev")}
+                  className="text-gray-600 hover:text-gray-800"
+                >
+                  <svg
+                    className="w-5 h-5"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M15 19l-7-7 7-7"
+                    />
+                  </svg>
+                </button>
+                <span className="text-lg font-medium text-gray-900">
+                  {monthNames[currentMonth.getMonth()]}{" "}
+                  {currentMonth.getFullYear()}
+                </span>
+                <button
+                  onClick={() => navigateMonth("next")}
+                  className="text-gray-600 hover:text-gray-800"
+                >
+                  <svg
+                    className="w-5 h-5"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M9 5l7 7-7 7"
+                    />
+                  </svg>
+                </button>
+              </div>
+
+              {/* Total Appointments */}
+              <div className="text-sm text-gray-600">
+                {totalAppointments} APPOINTMENTS
+              </div>
+            </div>
+
+            {/* Right Side */}
+            <div className="flex items-center space-x-4">
+              {/* Add Button */}
+              <button
+                onClick={handleAddClick}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center space-x-2"
+              >
+                <svg
+                  className="w-4 h-4"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M12 4v16m8-8H4"
+                  />
+                </svg>
+                <span>ADD</span>
+              </button>
+
+              {/* View Type Selector */}
+              <div className="flex bg-gray-100 rounded-lg p-1">
+                {(["Month", "Week", "Day", "List"] as const).map((view) => (
+                  <button
+                    key={view}
+                    onClick={() => {
+                      setViewType(view);
+                      if (view === "Week" || view === "Day") {
+                        setSelectedDate(new Date());
+                      }
+                    }}
+                    className={`px-3 py-1 rounded text-sm font-medium ${
+                      viewType === view
+                        ? "bg-blue-600 text-white"
+                        : "text-gray-600 hover:text-gray-800"
+                    }`}
+                  >
+                    {view}
+                  </button>
+                ))}
+              </div>
+
+              {/* Show: searchable owner filter */}
+              <OwnerSearchSelect
+                value={ownerFilter}
+                options={internalUsers}
+                onChange={setOwnerFilter}
+                placeholder="Search and select..."
+              />
+
+              {/* Action Icons */}
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={handlePinToggle}
+                  className={`p-2 rounded ${isRecordPinned ? "text-yellow-600 hover:text-yellow-700" : "text-gray-600 hover:text-gray-800"}`}
+                  title={isRecordPinned ? "Unpin" : "Pin"}
+                  aria-label={isRecordPinned ? "Unpin" : "Pin"}
+                >
+                  <BsFillPinAngleFill size={20} />
+                </button>
+                <button
+                  onClick={() => fetchAppointments()}
+                  className="p-2 text-gray-600 hover:text-gray-800"
+                  title="Refresh"
+                >
+                  <FiRefreshCw size={20} />
+                </button>
+                <button
+                  onClick={handlePrint}
+                  className="p-2 text-gray-600 hover:text-gray-800"
+                  title="Print"
+                >
+                  <FiPrinter size={20} />
+                </button>
+                <button
+                  onClick={handleClose}
+                  className="p-2 text-gray-600 hover:text-gray-800"
+                  title="Close"
+                >
+                  <FiX size={20} />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Calendar Content */}
+        {viewType === "Month" && (
+          <div className="px-6 py-6">
+            {/* Day Headers */}
+            <div className="grid grid-cols-7 gap-1 mb-2">
+              {dayNames.map((day) => (
+                <div
+                  key={day}
+                  className="text-center text-sm font-medium text-gray-600 py-2"
+                >
+                  {day}
+                </div>
+              ))}
+            </div>
+
+            {/* Calendar Days */}
+            <div className="grid grid-cols-7 gap-1">
+              {calendarData.map((dayData, index) => {
+                const isSelected =
+                  toYmdLocal(dayData.date) === toYmdLocal(selectedDate);
+
+                return (
+                  <div
+                    key={index}
+                    className={`min-h-[80px] border p-2 cursor-pointer hover:bg-gray-50 ${
+                      dayData.isToday ? "bg-blue-50 border-blue-300" : "border-gray-200"
+                    } ${
+                      isSelected ? "ring-2 ring-blue-600 bg-blue-100" : ""
+                    }`}
+                    onClick={() => setSelectedDate(dayData.date)}
+                  >
+                  <div className="flex flex-col h-full">
+                    <div
+                      className={`text-sm ${
+                        dayData.isToday
+                          ? "text-blue-600 font-semibold"
+                          : dayData.isCurrentMonth
+                            ? "text-gray-700"
+                            : "text-gray-300"
+                      }`}
+                    >
+                      {dayData.day}
+                    </div>
+                    <div
+                      className={`text-lg font-bold mt-1 ${
+                        dayData.isToday
+                          ? "text-blue-600"
+                          : dayData.isCurrentMonth
+                            ? "text-blue-500"
+                            : "text-gray-300"
+                      }`}
+                    >
+                      {dayData.appointmentCount || 0}
+                    </div>
+                  </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {viewType === "Week" && renderWeekView()}
+        {viewType === "Day" && renderDayView()}
+        {viewType === "List" && renderListView()}
+
+        {/* Available Section (Month View) - between Calendar and Appointments */}
+        {viewType === "Month" && (
+          <div className="px-6 pb-4 no-print">
+            <section
+              className="bg-white border border-gray-200 rounded-lg overflow-hidden"
+              aria-label="Available"
+            >
+              <h3 className="text-sm font-semibold text-gray-700 px-4 py-3 border-b border-gray-200 bg-gray-50">
+                Available
+              </h3>
+              <div className="p-4 min-h-[60px]">
+                {selectedDate ? (
+                  <p className="text-sm text-gray-600">
+                    Selected:{" "}
+                    {selectedDate.toLocaleDateString(undefined, {
+                      weekday: "short",
+                      month: "short",
+                      day: "numeric",
+                      year: "numeric",
+                    })}{" "}
+                    —{" "}
+                    {
+                      appointments.filter(
+                        (apt) =>
+                          toYmdFromUnknown(apt.date) === toYmdLocal(selectedDate),
+                      ).length
+                    }{" "}
+                    appointment(s) this day
+                  </p>
+                ) : (
+                  <p className="text-sm text-gray-500">
+                    Select a day in the calendar above.
+                  </p>
+                )}
+              </div>
+            </section>
+          </div>
+        )}
+
+        {/* Appointments Section (Month View) - directly below Available */}
+        {viewType === "Month" && (
+          <div className="px-6 pb-6 no-print">
+            <h3 className="text-sm font-semibold text-gray-700 mb-2">
+              Appointments
+            </h3>
+            {/* Items Per Page */}
+            <div className="bg-gray-50 px-4 py-2 border-x border-gray-200">
+              <div className="flex items-center space-x-2 text-sm text-gray-600">
+                <span>ITEMS PER PAGE:</span>
+                <select
+                  value={monthTableItemsPerPage}
+                  onChange={(e) => {
+                    setMonthTableItemsPerPage(Number(e.target.value));
+                    setMonthTableCurrentPage(1);
+                  }}
+                  className="border border-gray-300 rounded px-2 py-1 bg-white"
+                >
+                  <option value={10}>10</option>
+                  <option value={20}>20</option>
+                  <option value={50}>50</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Appointments Table */}
+            <div className="bg-white border border-gray-200 rounded-b-lg overflow-hidden">
+              <DndContext
+                collisionDetection={closestCenter}
+                onDragEnd={handleMonthTableColumnDragEnd}
+              >
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <SortableContext
+                          items={monthTableColumnFields}
+                          strategy={horizontalListSortingStrategy}
+                        >
+                          {monthTableColumnFields.map((key) => {
+                            const columnInfo = getColumnInfo(key);
+                            if (!columnInfo) return null;
+
+                            const typeOptions = [
+                              { label: "Zoom Meeting", value: "zoom" },
+                              { label: "Interview", value: "Interview" },
+                              { label: "Meeting", value: "Meeting" },
+                              { label: "Phone Call", value: "Phone Call" },
+                              { label: "Follow-up", value: "Follow-up" },
+                              { label: "Assessment", value: "Assessment" },
+                              { label: "Other", value: "Other" },
+                            ];
+
+                            const statusOptions = [
+                              { label: "Scheduled", value: "scheduled" },
+                              { label: "Live", value: "live" },
+                              { label: "Completed", value: "completed" },
+                            ];
+
+                            const zoomOptions = [
+                              { label: "Yes", value: "Yes" },
+                              { label: "No", value: "No" },
+                            ];
+                            const docsOptions = [
+                              { label: "Yes", value: "Yes" },
+                              { label: "No", value: "No" },
+                            ];
+
+                            return (
+                              <SortableColumnHeader
+                                key={key}
+                                id={key}
+                                columnKey={key}
+                                label={columnInfo.label}
+                                sortState={monthTableColumnSorts[key] || null}
+                                filterValue={
+                                  monthTableColumnFilters[key] || null
+                                }
+                                onSort={() => handleMonthTableColumnSort(key)}
+                                onFilterChange={(value) =>
+                                  handleMonthTableColumnFilter(key, value)
+                                }
+                                filterType={columnInfo.filterType}
+                                filterOptions={
+                                  key === "type"
+                                    ? typeOptions
+                                    : key === "status"
+                                      ? statusOptions
+                                      : key === "zoom"
+                                        ? zoomOptions
+                                        : key === "documents"
+                                          ? docsOptions
+                                        : undefined
+                                }
+                              />
+                            );
+                          })}
+                        </SortableContext>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {(() => {
+                        const startIndex =
+                          (monthTableCurrentPage - 1) * monthTableItemsPerPage;
+                        const endIndex = startIndex + monthTableItemsPerPage;
+                        const paginatedAppointments =
+                          filteredAndSortedSelectedDayAppointments.slice(
+                            startIndex,
+                            endIndex,
+                          );
+                        const totalPages = Math.ceil(
+                          filteredAndSortedSelectedDayAppointments.length /
+                            monthTableItemsPerPage,
+                        );
+                        const totalItems =
+                          filteredAndSortedSelectedDayAppointments.length;
+
+                        if (paginatedAppointments.length === 0) {
+                          return (
+                            <tr>
+                              <td
+                                colSpan={monthTableColumnFields.length}
+                                className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 text-center"
+                              >
+                                {Object.keys(monthTableColumnFilters).length > 0
+                                  ? "No appointments found matching your filters."
+                                  : "No appointments for selected date"}
+                              </td>
+                            </tr>
+                          );
+                        }
+
+                        return paginatedAppointments.map((appointment) => (
+                          <tr key={appointment.id} className="hover:bg-gray-50">
+                            {monthTableColumnFields.map((key) => {
+                              const value = getColumnValue(appointment, key);
+                              return (
+                                <td
+                                  key={key}
+                                  className="px-6 py-4 whitespace-nowrap text-sm text-gray-500"
+                                >
+                                  {key === "status" && appointment.status ? (
+                                    <span
+                                      className={`px-2 py-1 rounded text-xs font-medium ${
+                                        appointment.status === "live"
+                                          ? "bg-red-100 text-red-800"
+                                          : appointment.status === "completed"
+                                            ? "bg-green-100 text-green-800"
+                                            : "bg-gray-100 text-gray-800"
+                                      }`}
+                                    >
+                                      {appointment.status
+                                        .charAt(0)
+                                        .toUpperCase() +
+                                        appointment.status.slice(1)}
+                                    </span>
+                                  ) : key === "participant" &&
+                                    appointment.participant_type &&
+                                    appointment.participant_id ? (
+                                    <RecordNameResolver
+                                      id={appointment.participant_id}
+                                      type={
+                                        getParticipantRecordType(
+                                          appointment.participant_type,
+                                        ) || "organization"
+                                      }
+                                      clickable={
+                                        appointment.participant_type !==
+                                        "internal"
+                                      }
+                                      fallback={appointment.client || "—"}
+                                      className="text-sm"
+                                    />
+                                  ) : key === "zoom" &&
+                                    appointment.zoom_join_url ? (
+                                    <div className="flex flex-col gap-1">
+                                      <a
+                                        href={appointment.zoom_join_url}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-blue-600 hover:text-blue-800 text-xs"
+                                        onClick={(e) => e.stopPropagation()}
+                                      >
+                                        Join
+                                      </a>
+                                      {appointment.zoom_start_url && (
+                                        <a
+                                          href={appointment.zoom_start_url}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="text-blue-500 hover:text-blue-700 text-xs"
+                                          title="Host start link"
+                                          onClick={(e) => e.stopPropagation()}
+                                        >
+                                          Start
+                                        </a>
+                                      )}
+                                    </div>
+                                  ) : key === "documents" &&
+                                    appointment.document_urls &&
+                                    appointment.document_urls.length > 0 ? (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        const url = appointment.document_urls?.[0];
+                                        if (!url) return;
+                                        const name =
+                                          url.split("/").pop() || "Document";
+                                        setDocumentViewer({ url, name });
+                                      }}
+                                      className="text-blue-600 hover:text-blue-800 underline text-xs"
+                                    >
+                                      View
+                                    </button>
+                                  ) : key === "type" ? (
+                                    <span className="capitalize">{value}</span>
+                                  ) : (
+                                    value
+                                  )}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ));
+                      })()}
+                    </tbody>
+                  </table>
+                </div>
+              </DndContext>
+
+              {/* Pagination */}
+              {(() => {
+                const startIndex =
+                  (monthTableCurrentPage - 1) * monthTableItemsPerPage;
+                const endIndex = startIndex + monthTableItemsPerPage;
+                const totalPages = Math.ceil(
+                  filteredAndSortedSelectedDayAppointments.length /
+                    monthTableItemsPerPage,
+                );
+                const totalItems =
+                  filteredAndSortedSelectedDayAppointments.length;
+
+                if (totalPages <= 1) return null;
+
+                return (
+                  <div className="px-4 py-3 flex items-center justify-between border-t border-gray-200 sm:px-6 overflow-x-auto min-w-0">
+                    <div className="flex-1 flex justify-between sm:hidden">
+                      <button
+                        onClick={() =>
+                          setMonthTableCurrentPage((prev) =>
+                            Math.max(1, prev - 1),
+                          )
+                        }
+                        disabled={monthTableCurrentPage === 1}
+                        className="relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        Previous
+                      </button>
+                      <button
+                        onClick={() =>
+                          setMonthTableCurrentPage((prev) =>
+                            Math.min(totalPages, prev + 1),
+                          )
+                        }
+                        disabled={monthTableCurrentPage === totalPages}
+                        className="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        Next
+                      </button>
+                    </div>
+                    <div className="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
+                      <div>
+                        <p className="text-sm text-gray-700">
+                          Showing{" "}
+                          <span className="font-medium">
+                            {totalItems === 0 ? 0 : startIndex + 1}
+                          </span>{" "}
+                          to{" "}
+                          <span className="font-medium">
+                            {Math.min(endIndex, totalItems)}
+                          </span>{" "}
+                          of <span className="font-medium">{totalItems}</span>{" "}
+                          results
+                        </p>
+                      </div>
+                      <div>
+                        <nav
+                          className="relative z-0 inline-flex rounded-md shadow-sm -space-x-px"
+                          aria-label="Pagination"
+                        >
+                          <button
+                            onClick={() =>
+                              setMonthTableCurrentPage((prev) =>
+                                Math.max(1, prev - 1),
+                              )
+                            }
+                            disabled={monthTableCurrentPage === 1}
+                            className="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            <span className="sr-only">Previous</span>
+                            <svg
+                              className="h-5 w-5"
+                              xmlns="http://www.w3.org/2000/svg"
+                              viewBox="0 0 20 20"
+                              fill="currentColor"
+                              aria-hidden="true"
+                            >
+                              <path
+                                fillRule="evenodd"
+                                d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z"
+                                clipRule="evenodd"
+                              />
+                            </svg>
+                          </button>
+                          {Array.from(
+                            { length: totalPages },
+                            (_, i) => i + 1,
+                          ).map((page) => {
+                            if (
+                              page === 1 ||
+                              page === totalPages ||
+                              (page >= monthTableCurrentPage - 1 &&
+                                page <= monthTableCurrentPage + 1)
+                            ) {
+                              return (
+                                <button
+                                  key={page}
+                                  onClick={() => setMonthTableCurrentPage(page)}
+                                  className={`relative inline-flex items-center px-4 py-2 border text-sm font-medium ${
+                                    monthTableCurrentPage === page
+                                      ? "z-10 bg-blue-50 border-blue-500 text-blue-600"
+                                      : "bg-white border-gray-300 text-gray-500 hover:bg-gray-50"
+                                  }`}
+                                >
+                                  {page}
+                                </button>
+                              );
+                            } else if (
+                              page === monthTableCurrentPage - 2 ||
+                              page === monthTableCurrentPage + 2
+                            ) {
+                              return (
+                                <span
+                                  key={page}
+                                  className="relative inline-flex items-center px-4 py-2 border border-gray-300 bg-white text-sm font-medium text-gray-700"
+                                >
+                                  ...
+                                </span>
+                              );
+                            }
+                            return null;
+                          })}
+                          <button
+                            onClick={() =>
+                              setMonthTableCurrentPage((prev) =>
+                                Math.min(totalPages, prev + 1),
+                              )
+                            }
+                            disabled={monthTableCurrentPage === totalPages}
+                            className="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            <span className="sr-only">Next</span>
+                            <svg
+                              className="h-5 w-5"
+                              xmlns="http://www.w3.org/2000/svg"
+                              viewBox="0 0 20 20"
+                              fill="currentColor"
+                              aria-hidden="true"
+                            >
+                              <path
+                                fillRule="evenodd"
+                                d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z"
+                                clipRule="evenodd"
+                              />
+                            </svg>
+                          </button>
+                        </nav>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Document Viewer Modal */}
+      {documentViewer && (
+        <div className="fixed inset-0 bg-black/50 flex justify-center items-center px-4 z-50">
+          <div className="bg-white rounded-lg shadow-lg w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col">
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <h3 className="text-lg font-semibold text-gray-800 truncate">
+                {documentViewer.name || "Document"}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setDocumentViewer(null)}
+                className="text-gray-500 hover:text-gray-700"
+                aria-label="Close document viewer"
+              >
+                <FiX size={20} />
+              </button>
+            </div>
+            <div className="p-4 overflow-auto">
+              <DocumentViewer
+                filePath={documentViewer.url}
+                documentName={documentViewer.name || ""}
+                onOpenInNewTab={() => window.open(documentViewer.url, "_blank")}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Appointment Modal */}
+      {showAddModal && (
+        <div className="fixed inset-0 bg-black/50 flex justify-center items-center px-4 z-50">
+          <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="text-2xl font-semibold text-gray-800">
+                Add Appointment
+              </h3>
+              <button
+                onClick={closeAddModal}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                <FiX size={24} />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Left Column */}
+              <div className="space-y-4">
+                {/* Date */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Date{" "}
+                    {appointmentForm.date ? (
+                      <span className="text-green-600">✓</span>
+                    ) : (
+                      <span className="text-red-500">*</span>
+                    )}
+                  </label>
+                  <input
+                    type="date"
+                    value={appointmentForm.date}
+                    onChange={(e) =>
+                      setAppointmentForm((prev) => ({
+                        ...prev,
+                        date: e.target.value,
+                      }))
+                    }
+                    className="w-full p-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    required
+                  />
+                </div>
+
+                {/* Time */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Time{" "}
+                    {appointmentForm.time ? (
+                      <span className="text-green-600">✓</span>
+                    ) : (
+                      <span className="text-red-500">*</span>
+                    )}
+                  </label>
+                  <input
+                    type="time"
+                    value={appointmentForm.time}
+                    onChange={(e) =>
+                      setAppointmentForm((prev) => ({
+                        ...prev,
+                        time: e.target.value,
+                      }))
+                    }
+                    className="w-full p-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    required
+                  />
+                </div>
+
+                {/* Type */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Type{" "}
+                    {appointmentForm.type ? (
+                      <span className="text-green-600">✓</span>
+                    ) : (
+                      <span className="text-red-500">*</span>
+                    )}
+                  </label>
+                  <select
+                    value={appointmentForm.type}
+                    onChange={(e) =>
+                      setAppointmentForm((prev) => ({
+                        ...prev,
+                        type: e.target.value,
+                      }))
+                    }
+                    className="w-full p-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    required
+                  >
+                    <option value="">Select type</option>
+                    <option value="zoom">Zoom Meeting</option>
+                    <option value="Interview">Interview</option>
+                    <option value="Meeting">Meeting</option>
+                    <option value="Phone Call">Phone Call</option>
+                    <option value="Follow-up">Follow-up</option>
+                    <option value="Assessment">Assessment</option>
+                    <option value="Other">Other</option>
+                  </select>
+                </div>
+
+                {/* Duration */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Duration (minutes)
+                  </label>
+                  <input
+                    type="number"
+                    value={appointmentForm.duration}
+                    onChange={(e) =>
+                      setAppointmentForm((prev) => ({
+                        ...prev,
+                        duration: parseInt(e.target.value) || 30,
+                      }))
+                    }
+                    min="15"
+                    step="15"
+                    className="w-full p-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+              </div>
+
+              {/* Right Column */}
+              <div className="space-y-4">
+                {/* Participant: Job Seekers and Hiring Managers only, with Name + Record Number */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Participant (optional)
+                  </label>
+                  <select
+                    value={
+                      appointmentForm.participant_type &&
+                      appointmentForm.participant_id
+                        ? `${appointmentForm.participant_type}:${appointmentForm.participant_id}`
+                        : ""
+                    }
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (!v) {
+                        setAppointmentForm((prev) => ({
+                          ...prev,
+                          participant_type: "",
+                          participant_id: "",
+                        }));
+                        return;
+                      }
+                      const [type, id] = v.split(":");
+                      setAppointmentForm((prev) => ({
+                        ...prev,
+                        participant_type: type,
+                        participant_id: id,
+                      }));
+                    }}
+                    className="w-full p-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    disabled={isLoadingLookups}
+                  >
+                    <option value="">Select participant (optional)</option>
+                    <optgroup label="Job Seekers">
+                      {jobSeekers.map((js: any) => {
+                        const name =
+                          js.full_name ||
+                          [js.first_name, js.last_name]
+                            .filter(Boolean)
+                            .join(" ") ||
+                          `#${js.id}`;
+                        const recNum = formatDisplayRecordNumber(
+                          "jobSeeker",
+                          js.record_number,
+                          js.id,
+                        );
+                        return (
+                          <option
+                            key={`js-${js.id}`}
+                            value={`job_seeker:${js.id}`}
+                          >
+                            {recNum} - {name}
+                          </option>
+                        );
+                      })}
+                    </optgroup>
+                    <optgroup label="Hiring Managers">
+                      {hiringManagers.map((hm: any) => {
+                        const name =
+                          hm.full_name ||
+                          [hm.first_name, hm.last_name]
+                            .filter(Boolean)
+                            .join(" ") ||
+                          `#${hm.id}`;
+                        const recNum = formatDisplayRecordNumber(
+                          "hiringManager",
+                          hm.record_number,
+                          hm.id,
+                        );
+                        return (
+                          <option
+                            key={`hm-${hm.id}`}
+                            value={`hiring_manager:${hm.id}`}
+                          >
+                            {recNum} - {name}
+                          </option>
+                        );
+                      })}
+                    </optgroup>
+                  </select>
+                </div>
+
+                {/* Job Selector */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Job (Optional)
+                  </label>
+                  <select
+                    value={appointmentForm.job_id}
+                    onChange={(e) =>
+                      setAppointmentForm((prev) => ({
+                        ...prev,
+                        job_id: e.target.value,
+                      }))
+                    }
+                    className="w-full p-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    disabled={isLoadingLookups}
+                  >
+                    <option value="">Select job (optional)</option>
+                    {jobs.map((job: any) => {
+                      const recNum = formatDisplayRecordNumber(
+                        "job",
+                        job.record_number,
+                        job.id,
+                      );
+                      return (
+                        <option key={job.id} value={job.id}>
+                          {recNum} - {job.job_title || "Untitled Job"}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+
+                {/* Invitees: multiple people to receive the calendar invite (Job Seekers, Hiring Managers, Internal users) */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Invite to calendar (emails will receive the invite)
+                  </label>
+                  <InviteeSearchAdd
+                    jobSeekers={jobSeekers}
+                    hiringManagers={hiringManagers}
+                    internalUsers={internalUsers}
+                    disabled={isLoadingLookups}
+                    onAdd={(inv) => {
+                      if (invitees.some((i) => i.type === inv.type && i.id === inv.id))
+                        return;
+                      setInvitees((prev) => [...prev, inv]);
+                    }}
+                  />
+                  {invitees.length > 0 && (
+                    <ul className="mt-2 space-y-1 max-h-32 overflow-y-auto">
+                      {invitees.map((inv, idx) => {
+                        let label = "";
+                        if (inv.type === "job_seeker") {
+                          const js = jobSeekers.find(
+                            (j: any) => j.id === inv.id,
+                          );
+                          label =
+                            js?.full_name ||
+                            [js?.first_name, js?.last_name]
+                              .filter(Boolean)
+                              .join(" ") ||
+                            `Job Seeker #${inv.id}`;
+                        } else if (inv.type === "hiring_manager") {
+                          const hm = hiringManagers.find(
+                            (h: any) => h.id === inv.id,
+                          );
+                          label =
+                            hm?.full_name ||
+                            [hm?.first_name, hm?.last_name]
+                              .filter(Boolean)
+                              .join(" ") ||
+                            `Hiring Manager #${inv.id}`;
+                        } else {
+                          const u = internalUsers.find(
+                            (u) => u.id === inv.id,
+                          );
+                          label = u?.name || `User #${inv.id}`;
+                        }
+                        return (
+                          <li
+                            key={`${inv.type}-${inv.id}-${idx}`}
+                            className="flex items-center justify-between text-sm bg-gray-50 rounded px-2 py-1.5"
+                          >
+                            <span className="text-gray-800 truncate">
+                              {label}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setInvitees((prev) =>
+                                  prev.filter(
+                                    (i) =>
+                                      !(i.type === inv.type && i.id === inv.id),
+                                  ),
+                                )
+                              }
+                              className="text-red-600 hover:text-red-800 ml-2 shrink-0"
+                              aria-label="Remove invitee"
+                            >
+                              <FiX size={14} />
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Invitations: who will receive the invite + Send / Not send */}
+            <div className="mt-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
+              <h4 className="text-sm font-medium text-gray-700 mb-2">
+                Invitations
+              </h4>
+              <p className="text-xs text-gray-500 mb-2">
+                When &quot;Send calendar invite to participants&quot; is
+                enabled, the invite is sent to the email of: the primary
+                participant above (if set), and everyone added under &quot;Invite
+                to calendar&quot;.
+              </p>
+              <ul className="text-sm text-gray-700 list-disc list-inside mb-3 min-h-6">
+                {appointmentForm.participant_type &&
+                appointmentForm.participant_id ? (
+                  (() => {
+                    const id = parseInt(appointmentForm.participant_id, 10);
+                    if (appointmentForm.participant_type === "job_seeker") {
+                      const js = jobSeekers.find((j: any) => j.id === id);
+                      const name = js
+                        ? js.full_name ||
+                          [js.first_name, js.last_name]
+                            .filter(Boolean)
+                            .join(" ") ||
+                          `#${js.id}`
+                        : `Participant #${id}`;
+                      return <li key="p">Primary: {name}</li>;
+                    }
+                    if (appointmentForm.participant_type === "hiring_manager") {
+                      const hm = hiringManagers.find((h: any) => h.id === id);
+                      const name = hm
+                        ? hm.full_name ||
+                          [hm.first_name, hm.last_name]
+                            .filter(Boolean)
+                            .join(" ") ||
+                          `#${hm.id}`
+                        : `Participant #${id}`;
+                      return <li key="p">Primary: {name}</li>;
+                    }
+                    return null;
+                  })()
+                ) : (
+                  <li className="text-gray-400">No primary participant</li>
+                )}
+                {invitees.length > 0 && (
+                  <li key="inv-count">
+                    {invitees.length} invitee(s) from &quot;Invite to calendar&quot;
+                  </li>
+                )}
+              </ul>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={appointmentForm.sendInvites}
+                  onChange={(e) =>
+                    setAppointmentForm((prev) => ({
+                      ...prev,
+                      sendInvites: e.target.checked,
+                    }))
+                  }
+                  className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                />
+                <span className="text-sm text-gray-700">
+                  Send calendar invite to participants
+                </span>
+              </label>
+              {!appointmentForm.sendInvites && (
+                <p className="text-xs text-gray-500 mt-1">
+                  Not sending to participants
+                </p>
+              )}
+            </div>
+
+            {/* Documents */}
+            <div className="mt-4">
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Documents (optional)
+              </label>
+              <input
+                type="file"
+                multiple
+                onChange={(e) => {
+                  const files = Array.from(e.target.files || []);
+                  setAppointmentDocuments(files);
+                }}
+                className="w-full p-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              />
+              {appointmentDocuments.length > 0 && (
+                <p className="text-xs text-gray-500 mt-1">
+                  {appointmentDocuments.length} file(s) selected
+                </p>
+              )}
+            </div>
+
+            {/* Description - Full Width */}
+            <div className="mt-4">
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Description / Notes
+              </label>
+              <textarea
+                value={appointmentForm.description}
+                onChange={(e) =>
+                  setAppointmentForm((prev) => ({
+                    ...prev,
+                    description: e.target.value,
+                  }))
+                }
+                rows={4}
+                className="w-full p-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Add any notes or description for this appointment..."
+              />
+            </div>
+
+            {/* Buttons */}
+            <div className="flex justify-end space-x-4 mt-6">
+              <button
+                onClick={closeAddModal}
+                className="px-4 py-2 border border-gray-300 rounded text-gray-700 hover:bg-gray-50"
+                disabled={isSavingAppointment}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveAppointment}
+                disabled={
+                  isSavingAppointment ||
+                  !appointmentForm.date ||
+                  !appointmentForm.time ||
+                  !appointmentForm.type
+                }
+                className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isSavingAppointment ? "Saving..." : "Save Appointment"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+};
+
+export default Planners;
