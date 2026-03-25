@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useLayoutEffect } from "react";
 import { createPortal } from "react-dom";
 import Link from "next/link";
 import { usePathname, useSearchParams, useRouter } from "next/navigation";
-import { getUser, logout } from "@/lib/auth";
+import { getUser, logoutAndSkipAutologin } from "@/lib/auth";
 import {
   type PinnedRecord,
   loadPinnedRecords,
@@ -512,13 +512,13 @@ export default function DashboardNav() {
       });
 
       // Use the updated logout utility function
-      logout();
+      logoutAndSkipAutologin();
 
       // Use router for navigation
       router.push("/auth/login");
     } catch (error) {
       console.error("Logout error:", error);
-      logout();
+      logoutAndSkipAutologin();
       router.push("/auth/login");
     } finally {
       setIsLoggingOut(false);

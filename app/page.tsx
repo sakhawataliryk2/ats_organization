@@ -6,7 +6,7 @@ export default function Home() {
   const router = useRouter();
 
   useEffect(() => {
-    router.push('/login');
+    router.push('/auth/login');
   }, [router]); // Added router to the dependency array
 
   return null;

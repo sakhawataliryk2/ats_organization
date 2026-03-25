@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { getUser, logout } from "@/lib/auth";
+import { getUser, logoutAndSkipAutologin } from "@/lib/auth";
 // Import icons from react-icons
 import {
   FiHome,
@@ -120,13 +120,13 @@ export default function HomeDashboardNav() {
       });
 
       // Use the updated logout utility function
-      logout();
+      logoutAndSkipAutologin();
 
       // Use router for navigation
       router.push("/auth/login");
     } catch (error) {
       console.error("Logout error:", error);
-      logout();
+      logoutAndSkipAutologin();
       router.push("/auth/login");
     } finally {
       setIsLoggingOut(false);

@@ -39,6 +39,19 @@ export const logout = (redirectUrl?: string) => {
     }
 };
 
+// Used for user-initiated logout. We disable auto-login so the user doesn't get
+// signed back in immediately.
+export const logoutAndSkipAutologin = (redirectUrl?: string) => {
+    if (typeof window !== 'undefined') {
+        try {
+            sessionStorage.setItem('skipAutologin', '1');
+        } catch {
+            // Ignore sessionStorage issues (private browsing, etc.)
+        }
+    }
+    logout(redirectUrl);
+};
+
 export const verifyToken = async (token: string): Promise<boolean> => {
     try {
         const secretKey = new TextEncoder().encode(

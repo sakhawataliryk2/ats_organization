@@ -1,13 +1,14 @@
 "use client";
 import Image from "next/image";
 import {
+  useEffect,
   useState,
   FormEvent,
   useRef,
   KeyboardEvent,
   ClipboardEvent,
 } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { setCookie } from "cookies-next";
 
@@ -26,6 +27,47 @@ export default function Login() {
   const otpInputsRef = useRef<Array<HTMLInputElement | null>>([]);
 
   const router = useRouter();
+
+  const searchParams = useSearchParams();
+  const redirectParam = searchParams.get("redirect");
+  const autologinError = searchParams.get("autologinError") === "1";
+  const [manualMode, setManualMode] = useState<boolean>(false);
+
+  useEffect(() => {
+    // Auto-login is disabled when the user explicitly logged out.
+    // We use sessionStorage so it doesn't persist across browser restarts.
+    if (autologinError) {
+      setManualMode(true);
+      return;
+    }
+
+    try {
+      const skip = sessionStorage.getItem("skipAutologin") === "1";
+      if (skip) {
+        setManualMode(true);
+        return;
+      }
+    } catch {
+      // Ignore sessionStorage issues (private browsing, etc.)
+    }
+
+    const qs = redirectParam
+      ? `?redirect=${encodeURIComponent(redirectParam)}`
+      : "";
+    window.location.replace(`/api/auth/autologin${qs}`);
+  }, [autologinError, redirectParam]);
+
+  const handleAutoSignIn = () => {
+    try {
+      sessionStorage.removeItem("skipAutologin");
+    } catch {
+      // Ignore sessionStorage issues
+    }
+    const qs = redirectParam
+      ? `?redirect=${encodeURIComponent(redirectParam)}`
+      : "";
+    window.location.replace(`/api/auth/autologin${qs}`);
+  };
 
   const completeLogin = (data: any) => {
     if (!data?.token) {
@@ -261,6 +303,54 @@ export default function Login() {
       setOtpLoading(false);
     }
   };
+
+  if (manualMode) {
+    return (
+      <div className="flex h-screen">
+        <div className="flex-1 flex flex-col items-center justify-center px-8">
+          <div className="w-full max-w-md">
+            <div className="flex justify-center mb-8">
+              <Image
+                src="https://completestaffingsolutions.com/wp-content/themes/completestaffing/images/logo.svg"
+                alt="Complete Staffing Solutions Logo"
+                width={250}
+                height={100}
+                priority
+              />
+            </div>
+
+            <div
+              className="bg-yellow-100 border border-yellow-400 text-yellow-800 px-4 py-3 rounded mb-4"
+              role="alert"
+            >
+              {autologinError
+                ? "Auto-login is not configured correctly on the server."
+                : "You are signed out. Click below to auto sign-in again."}
+            </div>
+
+            <button
+              type="button"
+              onClick={handleAutoSignIn}
+              className="w-full py-3 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
+            >
+              AUTO SIGN IN
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-screen">
+      <div className="flex-1 flex flex-col items-center justify-center px-8">
+        <div className="text-center">
+          <div className="text-lg font-semibold mb-2">Signing you in...</div>
+          <div className="text-sm text-gray-600">Please wait.</div>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="flex h-screen">
