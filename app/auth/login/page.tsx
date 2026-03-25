@@ -8,7 +8,7 @@ import {
   KeyboardEvent,
   ClipboardEvent,
 } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { setCookie } from "cookies-next";
 
@@ -27,11 +27,15 @@ export default function Login() {
   const otpInputsRef = useRef<Array<HTMLInputElement | null>>([]);
 
   const router = useRouter();
-
-  const searchParams = useSearchParams();
-  const redirectParam = searchParams?.get("redirect");
-  const autologinError = searchParams?.get("autologinError") === "1";
+  const [redirectParam, setRedirectParam] = useState<string | null>(null);
+  const [autologinError, setAutologinError] = useState<boolean>(false);
   const [manualMode, setManualMode] = useState<boolean>(false);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    setRedirectParam(params.get("redirect"));
+    setAutologinError(params.get("autologinError") === "1");
+  }, []);
 
   useEffect(() => {
     // Auto-login is disabled when the user explicitly logged out.
