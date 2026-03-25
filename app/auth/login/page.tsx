@@ -29,8 +29,8 @@ export default function Login() {
   const router = useRouter();
 
   const searchParams = useSearchParams();
-  const redirectParam = searchParams.get("redirect");
-  const autologinError = searchParams.get("autologinError") === "1";
+  const redirectParam = searchParams?.get("redirect");
+  const autologinError = searchParams?.get("autologinError") === "1";
   const [manualMode, setManualMode] = useState<boolean>(false);
 
   useEffect(() => {
