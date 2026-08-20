@@ -1,0 +1,2268 @@
+"use client";
+
+import React from "react";
+import LookupField from "./LookupField";
+import MultiSelectLookupField, { type MultiSelectLookupType } from "./MultiSelectLookupField";
+import { FiCalendar, FiLock } from "react-icons/fi";
+import { isValidUSPhoneNumber } from "@/app/utils/phoneValidation";
+
+interface CustomFieldDefinition {
+  id: string;
+  field_name: string;
+  field_label: string;
+  field_type: string;
+  is_required: boolean;
+  is_hidden: boolean;
+  is_read_only?: boolean;
+  options?: string[] | string | Record<string, unknown> | null;
+  placeholder?: string | null;
+  default_value?: string | null;
+  sort_order: number;
+  lookup_type?: "organizations" | "hiring-managers" | "job-seekers" | "jobs" | "owner";
+  sub_field_ids?: number[] | string[];
+  /** When set, this field is disabled until the referenced field has a value */
+  dependent_on_field_id?: string | null;
+}
+
+/** Optional context for lookups (e.g. organizationId to filter hiring-managers by org) */
+export interface CustomFieldRendererContext {
+  /** @deprecated Use organizationIdOnlyForBillingContacts to filter only Billing contacts, not Reporting to */
+  organizationId?: string;
+  /** When set, only fields whose label includes "billing" (e.g. Billing contact, Billing contacts) get HM/contacts filtered by this org. Reporting to stays unfiltered. */
+  organizationIdOnlyForBillingContacts?: string;
+}
+
+/** True when the field is a billing-contact-style lookup (label or field_name contains "billing"); uses .includes() so "Billing contact" and "Billing contacts" both match. */
+function isBillingContactLookupField(
+  field: { field_label?: string | null; field_type?: string; lookup_type?: string; field_name?: string; [k: string]: any },
+): boolean {
+  const rawLabel =
+    field.field_label ??
+    (field as any).fieldLabel ??
+    field.label ??
+    "";
+  const label = String(rawLabel).trim().toLowerCase().replace(/\s+/g, " ");
+  const fieldName = String(field.field_name ?? "").trim().toLowerCase();
+  const hasBillingInLabel = label.includes("billing");
+  const hasBillingInName = fieldName.includes("billing");
+  if (!hasBillingInLabel && !hasBillingInName) return false;
+  const lt = String(
+    (field.lookup_type ?? (field as any).lookup_type) ?? "",
+  ).toLowerCase();
+  return lt === "hiring-managers" || lt === "hiring_managers" || lt === "contacts";
+}
+
+/** Renders * (required) or ✔ (valid) before the input when provided by parent */
+function ValidationIndicator({ type }: { type: "required" | "valid" }) {
+  return (
+    <span
+      className={`shrink-0 text-sm font-semibold ${type === "required" ? "text-red-500" : "text-green-500"}`}
+      aria-hidden
+    >
+      {type === "required" ? "*" : "✔"}
+    </span>
+  );
+}
+
+/** Wraps content with optional validation indicator before the input */
+function withValidationWrapper(
+  content: React.ReactNode,
+  validationIndicator?: "required" | "valid"
+): React.ReactNode {
+  if (!validationIndicator) return content;
+  return (
+    <div className="flex items-center gap-3 w-full">
+      <ValidationIndicator type={validationIndicator} />
+      <div className="flex-1 min-w-0">{content}</div>
+    </div>
+  );
+}
+
+/** Clear (X) button for text/number inputs */
+function ClearButton({
+  onClick,
+  disabled,
+  className = "right-2 top-1/2 -translate-y-1/2",
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`absolute ${className} text-gray-400 hover:text-gray-600 focus:outline-none disabled:opacity-50`}
+      aria-label="Clear"
+    >
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <line x1="18" y1="6" x2="6" y2="18" />
+        <line x1="6" y1="6" x2="18" y2="18" />
+      </svg>
+    </button>
+  );
+}
+
+/** Searchable multi-select for static options (same UI/UX as MultiSelectLookupField but with given options) */
+function SearchableMultiSelect({
+  options,
+  value,
+  onChange,
+  placeholder = "Type to search...",
+  disabled = false,
+  className = "w-full p-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500",
+  id,
+}: {
+  options: string[];
+  value: string[];
+  onChange: (value: string[]) => void;
+  placeholder?: string;
+  disabled?: boolean;
+  className?: string;
+  id?: string;
+}) {
+  const [searchQuery, setSearchQuery] = React.useState("");
+  const [showDropdown, setShowDropdown] = React.useState(false);
+  const containerRef = React.useRef<HTMLDivElement>(null);
+
+  const selectedSet = new Set(value);
+  const q = searchQuery.trim().toLowerCase();
+  const filteredOptions = q
+    ? options.filter((o) => o.toLowerCase().includes(q))
+    : options;
+  const selectableOptions = filteredOptions.filter((o) => !selectedSet.has(o));
+
+  React.useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setShowDropdown(false);
+      }
+    };
+    if (showDropdown) document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [showDropdown]);
+
+  const addSelection = (option: string) => {
+    onChange([...value, option]);
+    setSearchQuery("");
+    setShowDropdown(false);
+  };
+
+  const removeSelection = (option: string) => {
+    onChange(value.filter((x) => x !== option));
+  };
+
+  return (
+    <div ref={containerRef} className="relative" id={id}>
+      <div
+        className={
+          className +
+          " min-h-[42px] flex flex-wrap items-center gap-2 " +
+          (disabled ? " bg-gray-100 cursor-not-allowed opacity-70" : "")
+        }
+      >
+        {value.map((opt) => (
+          <span
+            key={opt}
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-100 text-blue-800 text-sm"
+          >
+            {opt}
+            {!disabled && (
+              <button
+                type="button"
+                onClick={() => removeSelection(opt)}
+                className="hover:text-blue-600 font-bold leading-none"
+                aria-label="Remove"
+              >
+                ×
+              </button>
+            )}
+          </span>
+        ))}
+        {!disabled && (
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => {
+              setSearchQuery(e.target.value);
+              setShowDropdown(true);
+            }}
+            onFocus={() => setShowDropdown(true)}
+            placeholder={value.length === 0 ? placeholder : "Add more..."}
+            className="flex-1 min-w-[120px] border-0 p-0 focus:ring-0 focus:outline-none bg-transparent"
+          />
+        )}
+      </div>
+      {!disabled && showDropdown && (
+        <div className="absolute z-50 w-full mt-1 bg-white border border-gray-300 rounded shadow-lg max-h-60 overflow-y-auto">
+          {selectableOptions.length > 0 ? (
+            selectableOptions.map((opt) => (
+              <button
+                key={opt}
+                type="button"
+                onClick={() => addSelection(opt)}
+                className="w-full text-left px-3 py-2 hover:bg-blue-50 border-b border-gray-100 last:border-b-0 text-sm"
+              >
+                {opt}
+              </button>
+            ))
+          ) : (
+            <div className="px-3 py-2 text-gray-500 text-sm">
+              {filteredOptions.length === 0 ? "No options" : "All selected or no match"}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface CustomFieldRendererProps {
+  field: CustomFieldDefinition;
+  value: any;
+  onChange: (fieldName: string, value: any) => void;
+  className?: string;
+  textareaRows?: number;
+  /** All fields for same entity (needed for composite to resolve sub-fields) */
+  allFields?: CustomFieldDefinition[];
+  /** Full values record (needed for composite so sub-fields get values by field_name) */
+  values?: Record<string, any>;
+  /** Optional context (e.g. organizationIdOnlyForBillingContacts) for lookup filtering */
+  context?: CustomFieldRendererContext;
+  /** When set, render * (required) or ✔ (valid) before the input instead of next to the label */
+  validationIndicator?: "required" | "valid";
+  /** When true, render this field as read-only regardless of field config */
+  forceReadOnly?: boolean;
+}
+
+export default function CustomFieldRenderer({
+  field,
+  value,
+  onChange,
+  className = "w-full p-2 border-b border-gray-300 focus:outline-none focus:border-blue-500",
+  textareaRows = 3,
+  allFields = [],
+  values: valuesRecord,
+  context,
+  validationIndicator,
+  forceReadOnly = false,
+}: CustomFieldRendererProps) {
+  const rawValueStr = String(value ?? "").trim();
+  const hasRealDateValue =
+    rawValueStr !== "" &&
+    rawValueStr !== "-" &&
+    rawValueStr !== "—" &&
+    rawValueStr.toLowerCase() !== "n/a";
+
+  // Normalize "Date Added" label (allow minor variations like "Date Added:", "DATE_ADDED", etc.)
+  const normalizedDateLabel = String(field.field_label || "")
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/[:]+$/g, "")
+    .trim();
+
+  const isDateAddedLabel =
+    normalizedDateLabel === "date added" ||
+    normalizedDateLabel.includes("date added");
+
+  // Treat "Date Added" fields with an existing value as read-only so they never change after first set
+  const baseReadOnly = Boolean((field as any).is_read_only);
+  const hasExistingValue =
+    field.field_type === "date" &&
+    isDateAddedLabel &&
+    hasRealDateValue;
+  const readOnly = baseReadOnly || hasExistingValue || forceReadOnly;
+
+  // Dependent on another field: disabled until that field has a value
+  const dependentOnFieldId = (field as any).dependent_on_field_id;
+  const dependentOnFieldName = React.useMemo(() => {
+    if (!dependentOnFieldId || !allFields?.length) return null;
+    const dep = allFields.find(
+      (f: any) => String(f.id) === String(dependentOnFieldId)
+    );
+    return dep?.field_name ?? null;
+  }, [dependentOnFieldId, allFields]);
+  const parentValue = valuesRecord && dependentOnFieldName != null ? valuesRecord[dependentOnFieldName] : undefined;
+  const isParentEmpty =
+    parentValue === undefined ||
+    parentValue === null ||
+    (typeof parentValue === "string" && parentValue.trim() === "") ||
+    (Array.isArray(parentValue) && parentValue.length === 0);
+  const isDisabledByDependency = Boolean(dependentOnFieldId && isParentEmpty);
+
+  // Clear this field's value when dependency becomes empty (parent cleared or changed)
+  React.useEffect(() => {
+    if (!dependentOnFieldId || !isDisabledByDependency) return;
+    if (value === undefined || value === null || value === "") return;
+    if (Array.isArray(value) && value.length === 0) return;
+    onChange(field.field_name, Array.isArray(value) ? [] : "");
+  }, [isDisabledByDependency, dependentOnFieldId, field.field_name, onChange]);
+
+  // Auto-fill Owner lookup field from cookies when empty (lookup_type is "owner" and type is lookup)
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const isOwnerLookupType =
+      String((field as any).lookup_type || "").trim().toLowerCase() === "owner";
+    const isLookupField = field.field_type === "lookup";
+
+    if (!isOwnerLookupType || !isLookupField || readOnly) return;
+
+    const hasValue =
+      value !== undefined &&
+      value !== null &&
+      String(value).trim() !== "";
+    if (hasValue) return;
+
+    const ownerId = getOwnerIdFromCookies();
+    if (ownerId) {
+      onChange(field.field_name, ownerId);
+    }
+  }, [field.field_label, field.field_name, field.field_type, readOnly, value, onChange]);
+
+  // Track if we've auto-populated the date to prevent infinite loops
+  const hasAutoFilledRef = React.useRef(false);
+
+  // Store last selection for phone input so we can handle replace (select + type) correctly
+  const phoneSelectionRef = React.useRef({ start: 0, end: 0 });
+
+  // Helper function to convert YYYY-MM-DD to mm/dd/yyyy
+  const formatDateToMMDDYYYY = React.useCallback((dateStr: string): string => {
+    if (!dateStr || dateStr.trim() === "") return "";
+    try {
+      // Check if it's already in mm/dd/yyyy format
+      if (/^\d{2}\/\d{2}\/\d{4}$/.test(dateStr)) {
+        return dateStr;
+      }
+      // Convert from YYYY-MM-DD to mm/dd/yyyy
+      if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+        const [year, month, day] = dateStr.split("-");
+        return `${month}/${day}/${year}`;
+      }
+      return dateStr;
+    } catch {
+      return dateStr;
+    }
+  }, []);
+
+  // Helper function to convert mm/dd/yyyy to YYYY-MM-DD
+  const formatDateToYYYYMMDD = React.useCallback((dateStr: string): string => {
+    if (!dateStr || dateStr.trim() === "") return "";
+    try {
+      // Check if it's already in YYYY-MM-DD format
+      if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+        return dateStr;
+      }
+      // Convert from mm/dd/yyyy to YYYY-MM-DD
+      if (/^\d{2}\/\d{2}\/\d{4}$/.test(dateStr)) {
+        const [month, day, year] = dateStr.split("/");
+        return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+      }
+      return dateStr;
+    } catch {
+      return dateStr;
+    }
+  }, []);
+
+  // Auto-populate today's date for "Date Added" fields by default
+  React.useEffect(() => {
+    // Even if the field is marked read-only (baseReadOnly), we still want to
+    // auto-fill it once when there is no existing value. We only skip when
+    // the field is disabled by dependency.
+    if (isDisabledByDependency) return;
+    if (
+      field.field_type === "date" &&
+      isDateAddedLabel &&
+      !hasRealDateValue &&
+      !hasAutoFilledRef.current
+    ) {
+      // Get today's date in mm/dd/yyyy format
+      const today = new Date();
+      const month = String(today.getMonth() + 1).padStart(2, "0");
+      const day = String(today.getDate()).padStart(2, "0");
+      const year = today.getFullYear();
+      const formattedDate = `${month}/${day}/${year}`;
+      // Set the value via onChange (store as mm/dd/yyyy for display, will convert to YYYY-MM-DD on submit)
+      onChange(field.field_name, formattedDate);
+      hasAutoFilledRef.current = true;
+    }
+    // Reset the ref if value changes externally (e.g., when editing)
+    if (hasRealDateValue) {
+      hasAutoFilledRef.current = false;
+    }
+  }, [
+    field.field_type,
+    field.field_label,
+    field.field_name,
+    isDateAddedLabel,
+    isDisabledByDependency,
+    onChange,
+    readOnly,
+    hasRealDateValue,
+  ]);
+
+  const normalizedOptions = React.useMemo<string[]>(() => {
+    if (!field.options) {
+      return [];
+    }
+
+    if (Array.isArray(field.options)) {
+      return field.options
+        .filter((option): option is string => typeof option === "string")
+        .map((option) => option.trim())
+        .filter((option) => option.length > 0);
+    }
+
+    if (typeof field.options === "string") {
+      const trimmed = field.options.trim();
+      if (!trimmed) {
+        return [];
+      }
+
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          return parsed
+            .filter((option): option is string => typeof option === "string")
+            .map((option) => option.trim())
+            .filter((option) => option.length > 0);
+        }
+      } catch {
+        // Fallback: assume newline-delimited list
+        return trimmed
+          .split(/\r?\n/)
+          .map((option) => option.trim())
+          .filter((option) => option.length > 0);
+      }
+    }
+
+    if (typeof field.options === "object") {
+      return Object.values(field.options)
+        .filter((option): option is string => typeof option === "string")
+        .map((option) => option.trim())
+        .filter((option) => option.length > 0);
+    }
+
+    return [];
+  }, [field.options]);
+
+  // Normalize option-based value: if value has spaces and matches an option when trimmed, sync trimmed option to form state
+  const isOptionBasedType =
+    field.field_type === "select" ||
+    field.field_type === "radio" ||
+    field.field_type === "multiselect" ||
+    field.field_type === "multicheckbox";
+  React.useEffect(() => {
+    if (!isOptionBasedType || readOnly || normalizedOptions.length === 0) return;
+    const raw = value;
+    if (field.field_type === "select" || field.field_type === "radio") {
+      const str = String(raw ?? "").trim();
+      if (!str) return;
+      const match = normalizedOptions.find((o) => o.trim() === str);
+      if (match != null && raw !== match) {
+        onChange(field.field_name, match);
+      }
+      return;
+    }
+    if (field.field_type === "multiselect" || field.field_type === "multicheckbox") {
+      const arr = Array.isArray(raw)
+        ? raw.map((v) => String(v).trim()).filter(Boolean)
+        : typeof raw === "string" && raw.trim() !== ""
+          ? raw.split(",").map((v) => v.trim()).filter(Boolean)
+          : [];
+      const normalized = arr
+        .map((v) => normalizedOptions.find((o) => o.trim() === v))
+        .filter(Boolean) as string[];
+      if (normalized.length > 0 && JSON.stringify(normalized) !== JSON.stringify(raw)) {
+        onChange(field.field_name, normalized);
+      }
+    }
+  }, [field.field_name, field.field_type, isOptionBasedType, normalizedOptions, onChange, readOnly, value]);
+
+  const isCredentialsMultiSelect =
+    field.field_type === "select" &&
+    String(field.field_label || "")
+      .trim()
+      .toLowerCase() === "credentials";
+
+  // Check if field is an address field (Full Address)
+  const isAddressField = (label?: string): boolean => {
+    const normalize = (value?: string): string =>
+      (value ?? "")
+        .toLowerCase()
+        .replace(/[_-]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    const isCloseMatch = (word: string, target: string): boolean => {
+      if (word === target) return true;
+      if (Math.abs(word.length - target.length) > 1) return false;
+
+      let mismatches = 0;
+      for (let i = 0; i < Math.min(word.length, target.length); i++) {
+        if (word[i] !== target[i]) mismatches++;
+        if (mismatches > 1) return false;
+      }
+
+      return true;
+    };
+
+    const l = normalize(label);
+    const words = l.split(" ").filter(Boolean);
+
+    const hasFull = words.some(w => isCloseMatch(w, "full"));
+    const hasAddress = words.some(w => isCloseMatch(w, "address"));
+
+    return hasFull && hasAddress;
+  };
+
+  const fieldIsAddressField = isAddressField(field.field_label);
+
+  if (field.is_hidden) return null;
+
+  function formatNumberWithCommas(value: string | number) {
+    let num = Number(value);
+    if (isNaN(num)) return "";
+    return num.toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+  }
+
+  // Format salary values for display
+  const formatSalaryValue = (val: any) => {
+    if (field.field_name === "minSalary" || field.field_name === "maxSalary") {
+      if (val && !isNaN(parseFloat(val))) {
+        return parseFloat(val).toLocaleString("en-US", {
+          style: "currency",
+          currency: "USD",
+        });
+      }
+      return "";
+    }
+    return val || "";
+  };
+
+  // Phone number formatting function
+  const formatPhoneNumber = (input: string) => {
+    // Remove all non-numeric characters
+    const cleaned = input.replace(/\D/g, "");
+
+    // Limit to 10 digits
+    const limited = cleaned.substring(0, 10);
+
+    // Format as (000) 000-0000
+    if (limited.length >= 6) {
+      return `(${limited.substring(0, 3)}) ${limited.substring(
+        3,
+        6
+      )}-${limited.substring(6)}`;
+    } else if (limited.length >= 3) {
+      return `(${limited.substring(0, 3)}) ${limited.substring(3)}`;
+    } else if (limited.length > 0) {
+      return `(${limited}`;
+    }
+    return limited;
+  };
+
+  // Count digits in str before character position (exclusive)
+  const countDigitsBefore = (str: string, position: number): number => {
+    let count = 0;
+    for (let i = 0; i < position && i < str.length; i++) {
+      if (/\d/.test(str[i])) count++;
+    }
+    return count;
+  };
+
+  // Handle phone number input changes with cursor position preservation
+  const handlePhoneChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const input = e.target.value;
+    const oldValue = value || "";
+    const { start: prevStart, end: prevEnd } = phoneSelectionRef.current;
+
+    // Count digits in old and new values
+    const oldDigits = oldValue.replace(/\D/g, "");
+    const newDigits = input.replace(/\D/g, "");
+    const isAdding = newDigits.length > oldDigits.length;
+    const isDeleting = newDigits.length < oldDigits.length;
+    const hadSelection = prevEnd > prevStart;
+
+    // When user replaced a selection, use selection start; otherwise use cursor position (prevStart === prevEnd)
+    const oldCursorOrSelectionStart = prevStart;
+    const digitsBeforeCursor = countDigitsBefore(oldValue, oldCursorOrSelectionStart);
+    const selectedDigitCount = hadSelection
+      ? countDigitsBefore(oldValue, prevEnd) - countDigitsBefore(oldValue, prevStart)
+      : 0;
+
+    // Format the new value
+    const formatted = formatPhoneNumber(input);
+
+    let newCursorPosition = formatted.length;
+
+    if (hadSelection && (isAdding || isDeleting || selectedDigitCount > 0)) {
+      // Replace: user selected a range and typed. Cursor should be after the replacement.
+      const digitsTyped = newDigits.length - oldDigits.length + selectedDigitCount;
+      const targetDigitCount = Math.min(
+        Math.max(0, digitsBeforeCursor + digitsTyped),
+        newDigits.length
+      );
+      let digitCount = 0;
+      for (let i = 0; i < formatted.length; i++) {
+        if (/\d/.test(formatted[i])) {
+          digitCount++;
+          if (digitCount === targetDigitCount) {
+            newCursorPosition = i + 1;
+            break;
+          }
+        }
+      }
+      if (targetDigitCount === 0 && formatted.length > 0 && formatted[0] === "(") {
+        newCursorPosition = 1;
+      }
+    } else if (isDeleting) {
+      // Deleting: we removed the digit that was at/before the cursor, so place cursor after (digitsBeforeCursor - 1)
+      const targetDigitCount = Math.max(0, digitsBeforeCursor - 1);
+      let digitCount = 0;
+      for (let i = 0; i < formatted.length; i++) {
+        if (/\d/.test(formatted[i])) {
+          digitCount++;
+          if (digitCount === targetDigitCount) {
+            newCursorPosition = i + 1;
+            break;
+          }
+        }
+      }
+      if (targetDigitCount === 0 && formatted.length > 0 && formatted[0] === "(") {
+        newCursorPosition = 1;
+      }
+    } else if (isAdding) {
+      // Adding: cursor after the new digit(s)
+      const targetDigitCount = digitsBeforeCursor + 1;
+      let digitCount = 0;
+      for (let i = 0; i < formatted.length; i++) {
+        if (/\d/.test(formatted[i])) {
+          digitCount++;
+          if (digitCount === targetDigitCount) {
+            newCursorPosition = i + 1;
+            break;
+          }
+        }
+      }
+      if (newDigits.length >= 10) {
+        newCursorPosition = formatted.length;
+      }
+    } else {
+      // Same digit count (e.g. replace one digit with one)
+      let digitCount = 0;
+      for (let i = 0; i < formatted.length; i++) {
+        if (/\d/.test(formatted[i])) {
+          digitCount++;
+          if (digitCount === digitsBeforeCursor) {
+            newCursorPosition = i + 1;
+            break;
+          }
+        }
+      }
+    }
+
+    onChange(field.field_name, formatted);
+
+    requestAnimationFrame(() => {
+      const el = e.target;
+      el.setSelectionRange(newCursorPosition, newCursorPosition);
+      phoneSelectionRef.current = { start: newCursorPosition, end: newCursorPosition };
+    });
+  };
+
+  const handlePhoneSelect = (e: React.SyntheticEvent<HTMLInputElement>) => {
+    const target = e.target as HTMLInputElement;
+    phoneSelectionRef.current = {
+      start: target.selectionStart ?? 0,
+      end: target.selectionEnd ?? 0,
+    };
+  };
+
+  const fieldProps = {
+    id: field.field_name,
+    value: value || "",
+    onChange: (
+      e: React.ChangeEvent<
+        HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
+      >
+    ) => (readOnly ? undefined : onChange(field.field_name, e.target.value)),
+    className,
+    placeholder: field.placeholder || "",
+    required: field.is_required,
+    readOnly,
+    disabled: readOnly,
+  };
+
+  // Special props for salary fields (without onChange)
+  const salaryFieldProps = {
+    id: field.field_name,
+    className,
+    placeholder: field.placeholder || "",
+    required: field.is_required,
+  };
+
+  // Display combined address value if this is an address field
+  if (fieldIsAddressField && allFields && valuesRecord) {
+    const normalize = (s: string) => (s || "").toLowerCase().trim();
+
+    const findAddressField = (labels: string[]) =>
+      allFields.find((f) =>
+        labels.some((l) => normalize(f.field_label) === normalize(l))
+      );
+
+    const addressField = findAddressField(["address", "address1"]);
+    const address2Field = findAddressField(["address2", "address 2"]);
+    const cityField = findAddressField(["city"]);
+    const stateField = findAddressField(["state"]);
+    const zipField = findAddressField(["zip", "zip code", "postal code"]);
+
+    // Get values from the address sub-fields
+    const address = addressField ? (valuesRecord[addressField.field_name] || "").trim() : "";
+    const address2 = address2Field ? (valuesRecord[address2Field.field_name] || "").trim() : "";
+    const city = cityField ? (valuesRecord[cityField.field_name] || "").trim() : "";
+    const state = stateField ? (valuesRecord[stateField.field_name] || "").trim() : "";
+    const zip = zipField ? (valuesRecord[zipField.field_name] || "").trim() : "";
+
+    // Combine city and state
+    const cityState = [city, state].filter(Boolean).join(", ");
+
+    // Combine all parts: Address, Address 2, City/State, Zip
+    const combinedParts = [address, address2, cityState, zip].filter(Boolean);
+    const autoCombinedAddress = combinedParts.join(", ");
+
+    // Update Full Address when individual address fields change
+    React.useEffect(() => {
+      // Always update Full Address with combined value when individual fields change
+      // Only update if the combined value is different from current value
+      if (autoCombinedAddress && autoCombinedAddress !== (value || "")) {
+        onChange(field.field_name, autoCombinedAddress);
+      }
+    }, [address, address2, city, state, zip, field.field_name, onChange]);
+
+    // Display as editable text field
+    // onChange updates only the Full Address field, not the sub-fields
+    return (
+      <input
+        id={field.field_name}
+        type="text"
+        readOnly
+        // disabled
+        value={value || ""}
+        onChange={(e) => {
+          // Update only the Full Address field, don't affect sub-fields
+          onChange(field.field_name, e.target.value);
+        }}
+        className={className}
+        placeholder={field.placeholder || ""}
+        required={field.is_required}
+      />
+    );
+  }
+
+  switch (field.field_type) {
+    case "textarea":
+      return withValidationWrapper(
+        <div className="relative w-full">
+          <textarea
+            {...fieldProps}
+            className="w-full p-2 pr-8 border border-gray-300 rounded focus:outline-none focus:border-blue-500"
+            rows={textareaRows}
+          />
+          {(value ?? "") !== "" && !readOnly && (
+            <ClearButton onClick={() => onChange(field.field_name, "")} className="right-2 top-2" />
+          )}
+        </div>,
+        validationIndicator
+      );
+    case "select":
+      if (isCredentialsMultiSelect) {
+        const selectedValues = Array.isArray(value)
+          ? value.map((v) => String(v))
+          : typeof value === "string" && value.trim() !== ""
+            ? value
+              .split(",")
+              .map((v) => v.trim())
+              .filter(Boolean)
+            : [];
+
+        return withValidationWrapper(
+          <div
+            id={field.field_name}
+            className="w-full p-2 border border-gray-300 rounded"
+          >
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              {normalizedOptions.map((option, idx) => {
+                const checked = selectedValues.includes(option);
+                return (
+                  <label
+                    key={`${field.field_name}-${option}-${idx}`}
+                    className="flex items-center gap-2 text-sm text-gray-800"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) => {
+                        const next = e.target.checked
+                          ? Array.from(new Set([...selectedValues, option]))
+                          : selectedValues.filter((v) => v !== option);
+                        onChange(field.field_name, next);
+                      }}
+                      className="h-4 w-4"
+                    />
+                    <span>{option}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>,
+          validationIndicator
+        );
+      }
+      return withValidationWrapper(
+        <select
+          {...fieldProps}
+          value={
+            normalizedOptions.find(
+              (o) => o.trim() === String(fieldProps.value ?? "").trim()
+            ) ?? ""
+          }
+          onChange={(e) => {
+            const v = e.target.value;
+            onChange(field.field_name, v);
+          }}
+        >
+          <option value="">Select an option</option>
+          {normalizedOptions.map((option, idx) => (
+            <option key={`${field.field_name}-${option}-${idx}`} value={option}>
+              {option}
+            </option>
+          ))}
+        </select>,
+        validationIndicator
+      );
+    case "radio":
+      return withValidationWrapper(
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          {normalizedOptions.length === 0 ? (
+            <div className="text-sm text-red-500">
+              No options configured for this field.
+            </div>
+          ) : (
+            normalizedOptions.map((option) => {
+              const valStr = String(value ?? "").trim();
+              const isChecked = option.trim() === valStr;
+              return (
+                <label
+                  key={`${field.field_name}-${option}`}
+                  className="flex items-center gap-2 text-sm cursor-pointer"
+                >
+                  <input
+                    type="radio"
+                    name={field.field_name}
+                    value={option}
+                    checked={isChecked}
+                    onChange={() => onChange(field.field_name, option)}
+                    required={field.is_required}
+                  />
+                  <span>{option}</span>
+                </label>
+              );
+            })
+          )}
+        </div>,
+        validationIndicator
+      );
+    case "checkbox":
+      return (
+        <input
+          type="checkbox"
+          id={field.field_name}
+          checked={value === "true" || value === true}
+          onChange={(e) => (readOnly ? undefined : onChange(field.field_name, e.target.checked))}
+          className="h-4 w-4"
+          disabled={readOnly}
+        />
+      );
+    case "multiselect": {
+      const rawSelected = Array.isArray(value)
+        ? value.map((v) => String(v))
+        : typeof value === "string" && value.trim() !== ""
+          ? value.split(",").map((v) => v.trim()).filter(Boolean)
+          : [];
+      const selectedValues = normalizedOptions.filter((opt) =>
+        rawSelected.some((v) => v.trim() === opt.trim())
+      );
+      return readOnly ? (
+        <div className="py-2 px-2 border border-gray-200 rounded bg-gray-50 text-gray-700">
+          {selectedValues.length === 0 ? "—" : selectedValues.join(", ")}
+        </div>
+      ) : (
+        <SearchableMultiSelect
+          options={normalizedOptions}
+          value={selectedValues}
+          onChange={(val) => onChange(field.field_name, val)}
+          placeholder={field.placeholder || "Type to search..."}
+          disabled={readOnly}
+          className={className}
+          id={field.field_name}
+        />
+      );
+    }
+    case "multicheckbox": {
+      const rawSelected = Array.isArray(value)
+        ? value.map((v) => String(v))
+        : typeof value === "string" && value.trim() !== ""
+          ? value.split(",").map((v) => v.trim()).filter(Boolean)
+          : [];
+      const selectedValues = normalizedOptions.filter((opt) =>
+        rawSelected.some((v) => v.trim() === opt.trim())
+      );
+      const count = selectedValues.length;
+      const labelSingular = (field.field_label || "item").toLowerCase().replace(/\s*\(s\)$/, "");
+      const labelPlural = count === 1 ? labelSingular : `${labelSingular}s`;
+      const removeItem = (item: string) => {
+        if (readOnly) return;
+        onChange(
+          field.field_name,
+          selectedValues.filter((v) => v !== item)
+        );
+      };
+      return (
+        <div
+          id={field.field_name}
+          className="w-full p-4 border border-gray-200 rounded-lg bg-white"
+        >
+          <div className="space-y-3">
+            {normalizedOptions.length === 0 ? (
+              <span className="text-sm text-gray-500">No options configured.</span>
+            ) : (
+              normalizedOptions.map((option, idx) => {
+                const checked = selectedValues.includes(option);
+                return (
+                  <label
+                    key={`${field.field_name}-${option}-${idx}`}
+                    className="flex items-center gap-3 text-sm text-gray-700 cursor-pointer select-none"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) => {
+                        if (readOnly) return;
+                        const next = e.target.checked
+                          ? Array.from(new Set([...selectedValues, option]))
+                          : selectedValues.filter((v) => v !== option);
+                        onChange(field.field_name, next);
+                      }}
+                      className="h-4 w-4 shrink-0 rounded border-gray-300 text-blue-600 focus:ring-blue-500 focus:ring-offset-0"
+                      disabled={readOnly}
+                    />
+                    <span className="text-gray-700">{option}</span>
+                  </label>
+                );
+              })
+            )}
+          </div>
+          <div className="border-t border-gray-200 my-4" />
+          <div className="space-y-3">
+            <p className="text-sm text-gray-500">
+              Selected: {count} {labelPlural}
+            </p>
+            {count > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {selectedValues.map((item) => (
+                  <span
+                    key={item}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-blue-50 text-blue-800 text-sm"
+                  >
+                    {item}
+                    {!readOnly && (
+                      <button
+                        type="button"
+                        onClick={() => removeItem(item)}
+                        className="p-0.5 rounded-full hover:bg-blue-100 text-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:ring-offset-1"
+                        aria-label={`Remove ${item}`}
+                      >
+                        <span className="sr-only">Remove</span>
+                        <svg className="w-3.5 h-3.5 shrink-0" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
+                          <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                        </svg>
+                      </button>
+                    )}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+    case "composite": {
+      const subIds = (field as any).sub_field_ids;
+      const ids = Array.isArray(subIds) ? subIds.map(String) : [];
+      const subFields = ids.length > 0 && allFields.length > 0
+        ? ids
+          .map((id) => allFields.find((f) => String(f.id) === String(id)))
+          .filter(Boolean) as CustomFieldDefinition[]
+        : [];
+      if (subFields.length === 0) {
+        return (
+          <div className="text-sm text-gray-500 py-2 border border-dashed border-gray-300 rounded px-2">
+            Configure sub-fields in Admin → Field Mapping (Composite type).
+          </div>
+        );
+      }
+      const record = valuesRecord ?? (typeof value === "object" && value !== null ? value : {});
+      return (
+        <div className="space-y-3 border border-gray-200 rounded p-3 bg-gray-50/50">
+          {subFields.map((sub) => (
+            <div key={sub.id}>
+              <label className="block text-sm font-medium text-gray-700 mb-1">{sub.field_label}</label>
+              <CustomFieldRenderer
+                field={sub}
+                value={record[sub.field_name]}
+                onChange={onChange}
+                className={className}
+                textareaRows={textareaRows}
+                allFields={allFields}
+                values={valuesRecord}
+              />
+            </div>
+          ))}
+        </div>
+      );
+    }
+    case "link":
+    case "url": {
+      const handleUrlBlur = (e: React.FocusEvent<HTMLInputElement>) => {
+        const v = (e.target.value || "").trim();
+        if (v && !/^https?:\/\//i.test(v)) {
+          onChange(field.field_name, "https://" + v);
+        }
+      };
+      return (
+        <input
+          {...fieldProps}
+          type="url"
+          onBlur={handleUrlBlur}
+          pattern="(https?://|www\.).+"
+          title="Please enter a valid URL (https:// will be added automatically if missing)"
+          required={field.is_required}
+        />
+      );
+    }
+    case "number": {
+      // Check if this field is for job salaries
+      if (
+        field.field_name === "minSalary" ||
+        field.field_name === "maxSalary"
+      ) {
+        // Show formatted number when value is a number (e.g. from API/blur); show raw string while typing so backspace works
+        const displayValue =
+          typeof value === "number" && !Number.isNaN(value)
+            ? formatSalaryValue(value)
+            : value === "" || value === undefined || value === null
+              ? ""
+              : String(value);
+
+        return withValidationWrapper(
+          <div className="relative w-full">
+            <input
+              {...salaryFieldProps}
+              type="text"
+              value={displayValue}
+              className={`${className} pr-8`}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                let inputValue = e.target.value.replace(/[^0-9.]/g, "");
+                const decimalCount = (inputValue.match(/\./g) || []).length;
+                if (decimalCount > 1) {
+                  inputValue = inputValue.substring(0, inputValue.lastIndexOf("."));
+                }
+                if (inputValue.includes(".")) {
+                  const parts = inputValue.split(".");
+                  if (parts[1] && parts[1].length > 2) {
+                    inputValue = parts[0] + "." + parts[1].substring(0, 2);
+                  }
+                }
+                onChange(field.field_name, inputValue === "" ? "" : inputValue);
+              }}
+              onBlur={(e: React.FocusEvent<HTMLInputElement>) => {
+                const inputValue = e.target.value.replace(/[^0-9.]/g, "");
+                if (inputValue === "") {
+                  onChange(field.field_name, "");
+                  return;
+                }
+                const number = parseFloat(inputValue);
+                if (!Number.isNaN(number)) {
+                  onChange(field.field_name, number);
+                }
+              }}
+              placeholder="$XX,XXX.XX"
+            />
+            {(displayValue !== "" && displayValue !== undefined) && !readOnly && (
+              <ClearButton onClick={() => onChange(field.field_name, "")} />
+            )}
+          </div>,
+          validationIndicator
+        );
+      }
+
+      // Check if this is a ZIP code field (even if defined as "number" type, treat as text for leading zeros)
+      // Use label/type only — no field_name (Field_24 etc.) so mapping per entity is respected.
+      const isZipCodeFieldNumber =
+        field.field_label?.toLowerCase().includes("zip") ||
+        field.field_label?.toLowerCase().includes("postal code") ||
+        field.field_name?.toLowerCase().includes("zip");
+
+      if (isZipCodeFieldNumber) {
+        return withValidationWrapper(
+          <div className="relative w-full">
+            <input
+              id={field.field_name}
+              type="text"
+              inputMode="numeric"
+              maxLength={5}
+              value={value ?? ""}
+              onChange={(e) => {
+                const digitsOnly = e.target.value.replace(/\D/g, "").slice(0, 5);
+                e.target.value = digitsOnly;
+                onChange(field.field_name, digitsOnly);
+              }}
+              placeholder={field.placeholder || "12345"}
+              required={field.is_required}
+              className={`${className} pr-8`}
+            />
+            {(value ?? "") !== "" && !readOnly && (
+              <ClearButton onClick={() => onChange(field.field_name, "")} />
+            )}
+          </div>,
+          validationIndicator
+        );
+      }
+
+      // Check if this is a year field (Year Founded, etc.)
+      const isYearField =
+        field.field_label?.toLowerCase().includes("year") ||
+        field.field_name?.toLowerCase().includes("year");
+
+      // Check if this is a numeric field that allows values >= 0 (Number of Employees, Offices, Oasis Key)
+      // Use label/type only — no field_name (Field_32 etc.) so mapping per entity is respected.
+      const isNonNegativeField =
+        field.field_label?.toLowerCase().includes("employees") ||
+        field.field_label?.toLowerCase().includes("offices") ||
+        field.field_label?.toLowerCase().includes("oasis key") ||
+        field.field_name?.toLowerCase().includes("employees") ||
+        field.field_name?.toLowerCase().includes("offices") ||
+        field.field_name?.toLowerCase().includes("oasis");
+
+      if (isYearField) {
+        return withValidationWrapper(
+          <div className="relative w-full">
+            <input
+              {...fieldProps}
+              type="number"
+              min="2000"
+              max="2100"
+              maxLength={4}
+              className={`${fieldProps.className} pr-8`}
+              onInput={(e) => {
+                const target = e.target as HTMLInputElement;
+                if (target.value.length > 4) {
+                  target.value = target.value.slice(0, 4);
+                }
+              }}
+            />
+            {(value ?? "") !== "" && !readOnly && (
+              <ClearButton onClick={() => onChange(field.field_name, "")} />
+            )}
+          </div>,
+          validationIndicator
+        );
+      }
+
+      if (isNonNegativeField) {
+        return withValidationWrapper(
+          <div className="relative w-full">
+            <input
+              {...fieldProps}
+              type="number"
+              min="0"
+              step="1"
+              className={`${fieldProps.className} pr-8`}
+              onChange={(e) => {
+                const numValue = parseFloat(e.target.value);
+                if (e.target.value !== "" && !isNaN(numValue)) {
+                  if (numValue < 0) {
+                    e.target.setCustomValidity("Value must be 0 or greater");
+                    e.target.classList.add("border-red-500");
+                  } else {
+                    e.target.setCustomValidity("");
+                    e.target.classList.remove("border-red-500");
+                  }
+                } else {
+                  e.target.setCustomValidity("");
+                  e.target.classList.remove("border-red-500");
+                }
+                fieldProps.onChange(e);
+              }}
+              onBlur={(e) => {
+                const numValue = parseFloat(e.target.value);
+                if (e.target.value !== "" && !isNaN(numValue) && numValue < 0) {
+                  e.target.setCustomValidity("Value must be 0 or greater");
+                  e.target.classList.add("border-red-500");
+                } else {
+                  e.target.setCustomValidity("");
+                  e.target.classList.remove("border-red-500");
+                }
+              }}
+            />
+            {(value ?? "") !== "" && value !== undefined && !readOnly && (
+              <ClearButton onClick={() => onChange(field.field_name, "")} />
+            )}
+          </div>,
+          validationIndicator
+        );
+      }
+
+      return withValidationWrapper(
+        <div className="relative w-full">
+          <input
+            {...fieldProps}
+            type="number"
+            className={`${fieldProps.className} pr-8`}
+          />
+          {(value ?? "") !== "" && value !== undefined && !readOnly && (
+            <ClearButton onClick={() => onChange(field.field_name, "")} />
+          )}
+        </div>,
+        validationIndicator
+      );
+    }
+
+    case "percentage":
+      return withValidationWrapper(
+        <div className="relative w-full">
+          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 select-none">
+            %
+          </span>
+          <input
+            id={field.field_name}
+            type="number"
+            min="0"
+            max="100"
+            step="0.01"
+            value={value ?? ""}
+            onChange={(e) => {
+              const inputValue = e.target.value;
+              if (inputValue === "") {
+                onChange(field.field_name, "");
+                return;
+              }
+              const numValue = parseFloat(inputValue);
+              if (isNaN(numValue)) return;
+              if (numValue < 0) {
+                onChange(field.field_name, "0");
+                return;
+              }
+              if (numValue > 100) {
+                onChange(field.field_name, "100");
+                return;
+              }
+              onChange(field.field_name, numValue.toString());
+            }}
+            onBlur={(e) => {
+              const inputValue = e.target.value;
+              if (inputValue === "") return;
+              const numValue = parseFloat(inputValue);
+              if (!isNaN(numValue)) {
+                if (numValue < 0) {
+                  onChange(field.field_name, "0");
+                  e.target.value = "0";
+                } else if (numValue > 100) {
+                  onChange(field.field_name, "100");
+                  e.target.value = "100";
+                }
+              }
+            }}
+            placeholder={field.placeholder || "0"}
+            required={field.is_required}
+            className={`${className} pr-8`}
+          />
+          {(value ?? "") !== "" && value !== undefined && !readOnly && (
+            <ClearButton onClick={() => onChange(field.field_name, "")} className="right-7 top-1/2 -translate-y-1/2" />
+          )}
+        </div>,
+        validationIndicator
+      );
+    case "date": {
+      // Calendar popup state
+      const [showCalendar, setShowCalendar] = React.useState(false);
+      const [currentMonth, setCurrentMonth] = React.useState(new Date());
+      const calendarRef = React.useRef<HTMLDivElement>(null);
+
+      // Parse current value to Date object
+      const getCurrentDate = React.useMemo(() => {
+        if (!value || value === "") {
+          return new Date();
+        }
+        try {
+          let dateStr = String(value);
+          // If it's in mm/dd/yyyy format, convert to YYYY-MM-DD
+          if (/^\d{2}\/\d{2}\/\d{4}$/.test(dateStr)) {
+            const [month, day, year] = dateStr.split("/");
+            dateStr = `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+          }
+          const date = new Date(dateStr);
+          return isNaN(date.getTime()) ? new Date() : date;
+        } catch {
+          return new Date();
+        }
+      }, [value]);
+
+      // Format date value for display (mm/dd/yyyy)
+      const displayValue = React.useMemo(() => {
+        if (!value || value === "") {
+          // Only \"Date Added\" fields should visually default to today's date
+          if (!isDateAddedLabel) {
+            return "";
+          }
+          const today = new Date();
+          const month = String(today.getMonth() + 1).padStart(2, "0");
+          const day = String(today.getDate()).padStart(2, "0");
+          const year = today.getFullYear();
+          return `${month}/${day}/${year}`;
+        }
+        return formatDateToMMDDYYYY(String(value));
+      }, [value, formatDateToMMDDYYYY, isDateAddedLabel]);
+
+      // Handle date selection from calendar
+      const handleDateSelect = (selectedDate: Date) => {
+        if (readOnly || isDisabledByDependency) return;
+        const year = selectedDate.getFullYear();
+        const month = String(selectedDate.getMonth() + 1).padStart(2, "0");
+        const day = String(selectedDate.getDate()).padStart(2, "0");
+        const dateStr = `${year}-${month}-${day}`;
+        onChange(field.field_name, dateStr);
+        setShowCalendar(false);
+      };
+
+      // Handle manual input with mm/dd/yyyy formatting
+      const handleDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (readOnly || isDisabledByDependency) return;
+        let inputValue = e.target.value;
+        const digitsOnly = inputValue.replace(/\D/g, "");
+
+        let formatted = "";
+        if (digitsOnly.length > 0) {
+          formatted = digitsOnly.substring(0, 2);
+        }
+        if (digitsOnly.length >= 3) {
+          formatted += "/" + digitsOnly.substring(2, 4);
+        }
+        if (digitsOnly.length >= 5) {
+          formatted += "/" + digitsOnly.substring(4, 8);
+        }
+
+        if (formatted.length > 10) {
+          formatted = formatted.substring(0, 10);
+        }
+
+        e.target.value = formatted;
+
+        if (formatted.length === 10 && /^\d{2}\/\d{2}\/\d{4}$/.test(formatted)) {
+          const [month, day, year] = formatted.split("/");
+          const dateStr = `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+          const date = new Date(dateStr);
+          if (!isNaN(date.getTime())) {
+            onChange(field.field_name, dateStr);
+          } else {
+            onChange(field.field_name, formatted);
+          }
+        } else {
+          onChange(field.field_name, formatted);
+        }
+      };
+
+      // Calendar functions
+      const getDaysInMonth = (date: Date) => {
+        return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+      };
+
+      const getFirstDayOfMonth = (date: Date) => {
+        return new Date(date.getFullYear(), date.getMonth(), 1).getDay();
+      };
+
+      const getCalendarDays = () => {
+        const daysInMonth = getDaysInMonth(currentMonth);
+        const firstDay = getFirstDayOfMonth(currentMonth);
+        const days: (Date | null)[] = [];
+
+        // Add empty cells for days before the first day of the month
+        for (let i = 0; i < firstDay; i++) {
+          days.push(null);
+        }
+
+        // Add days of the month
+        for (let day = 1; day <= daysInMonth; day++) {
+          days.push(new Date(currentMonth.getFullYear(), currentMonth.getMonth(), day));
+        }
+
+        return days;
+      };
+
+      const navigateMonth = (direction: "prev" | "next") => {
+        setCurrentMonth((prev) => {
+          const newDate = new Date(prev);
+          if (direction === "prev") {
+            newDate.setMonth(prev.getMonth() - 1);
+          } else {
+            newDate.setMonth(prev.getMonth() + 1);
+          }
+          return newDate;
+        });
+      };
+
+      const goToToday = () => {
+        const today = new Date();
+        setCurrentMonth(today);
+        handleDateSelect(today);
+      };
+
+      const clearDate = () => {
+        onChange(field.field_name, "");
+        setShowCalendar(false);
+      };
+
+      // Close calendar when clicking outside
+      React.useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+          if (calendarRef.current && !calendarRef.current.contains(event.target as Node)) {
+            setShowCalendar(false);
+          }
+        };
+
+        if (showCalendar) {
+          document.addEventListener("mousedown", handleClickOutside);
+        }
+
+        return () => {
+          document.removeEventListener("mousedown", handleClickOutside);
+        };
+      }, [showCalendar]);
+
+      const monthNames = [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December"
+      ];
+      const dayNames = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+      const calendarDays = getCalendarDays();
+      const currentDateObj = getCurrentDate;
+
+      return withValidationWrapper(
+        <div className="relative w-full" ref={calendarRef}>
+          <div className="relative flex items-center w-full">
+            <input
+              id={field.field_name}
+              type="text"
+              value={displayValue}
+              onChange={handleDateChange}
+              onFocus={() => {
+                if (!readOnly && !isDisabledByDependency) setShowCalendar(true);
+              }}
+              placeholder="mm/dd/yyyy"
+              className={`${className} flex-1 min-w-0 pr-10 ${readOnly || isDisabledByDependency ? "bg-gray-50 text-gray-600 cursor-not-allowed" : ""}`}
+              required={field.is_required}
+              maxLength={10}
+              readOnly={readOnly || isDisabledByDependency}
+              disabled={readOnly || isDisabledByDependency}
+              onBlur={(e) => {
+                if (readOnly || isDisabledByDependency) return;
+                const inputValue = e.target.value.trim();
+                if (inputValue && inputValue.length === 10) {
+                  const [month, day, year] = inputValue.split("/");
+                  const dateStr = `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+                  const date = new Date(dateStr);
+                  if (!isNaN(date.getTime())) {
+                    onChange(field.field_name, dateStr);
+                  }
+                }
+              }}
+            />
+            {readOnly || isDisabledByDependency ? (
+              <FiLock className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500" />
+            ) : (
+              <button
+                type="button"
+                onClick={() => setShowCalendar(!showCalendar)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700 focus:outline-none"
+                title="Open calendar"
+              >
+                <FiCalendar className="w-5 h-5" />
+              </button>
+            )}
+          </div>
+
+          {showCalendar && (
+            <div className="absolute z-50 mt-1 bg-white border border-gray-300 rounded-lg shadow-lg p-4 w-80">
+              {/* Calendar Header */}
+              <div className="flex items-center justify-between mb-4">
+                <button
+                  type="button"
+                  onClick={() => navigateMonth("prev")}
+                  className="p-1 hover:bg-gray-100 rounded"
+                  title="Previous month"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                  </svg>
+                </button>
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold text-lg">
+                    {monthNames[currentMonth.getMonth()]} {currentMonth.getFullYear()}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => navigateMonth("next")}
+                    className="p-1 hover:bg-gray-100 rounded"
+                    title="Next month"
+                  >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+
+              {/* Day Names */}
+              <div className="grid grid-cols-7 gap-1 mb-2">
+                {dayNames.map((day) => (
+                  <div key={day} className="text-center text-xs font-medium text-gray-600 py-1">
+                    {day}
+                  </div>
+                ))}
+              </div>
+
+              {/* Calendar Days */}
+              <div className="grid grid-cols-7 gap-1">
+                {calendarDays.map((day, index) => {
+                  if (!day) {
+                    return <div key={`empty-${index}`} className="aspect-square" />;
+                  }
+
+                  const isToday =
+                    day.getDate() === new Date().getDate() &&
+                    day.getMonth() === new Date().getMonth() &&
+                    day.getFullYear() === new Date().getFullYear();
+
+                  const isSelected =
+                    day.getDate() === currentDateObj.getDate() &&
+                    day.getMonth() === currentDateObj.getMonth() &&
+                    day.getFullYear() === currentDateObj.getFullYear();
+
+                  return (
+                    <button
+                      key={day.toISOString()}
+                      type="button"
+                      onClick={() => handleDateSelect(day)}
+                      className={`
+                        aspect-square flex items-center justify-center text-sm rounded
+                        ${isSelected
+                          ? "bg-blue-600 text-white font-semibold"
+                          : isToday
+                            ? "bg-blue-100 text-blue-700 font-semibold"
+                            : "hover:bg-gray-100 text-gray-700"
+                        }
+                      `}
+                    >
+                      {day.getDate()}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Calendar Footer */}
+              <div className="flex items-center justify-between mt-4 pt-4 border-t border-gray-200">
+                <button
+                  type="button"
+                  onClick={goToToday}
+                  className="text-sm text-blue-600 hover:text-blue-800 font-medium"
+                >
+                  Today
+                </button>
+                <button
+                  type="button"
+                  onClick={clearDate}
+                  className="text-sm text-gray-600 hover:text-gray-800 font-medium"
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+          )}
+        </div>,
+        validationIndicator
+      );
+    }
+    case "datetime":
+      const inputType =
+        field.field_type === "datetime" ? "datetime-local" : field.field_type;
+
+      return (
+        <input
+          {...fieldProps}
+          type={inputType}
+          value={value ? value.slice(0, 16) : ""}
+          onChange={(e) => onChange(field.field_name, e.target.value)}
+        />
+      );
+
+    case "email":
+      return withValidationWrapper(
+        <div className="relative w-full">
+          <input {...fieldProps} type="email" className={`${fieldProps.className} pr-8`} />
+          {(value ?? "") !== "" && !readOnly && (
+            <ClearButton onClick={() => onChange(field.field_name, "")} />
+          )}
+        </div>,
+        validationIndicator
+      );
+    case "phone":
+      return withValidationWrapper(
+        <div className="relative w-full">
+          <input
+            {...fieldProps}
+            type="tel"
+            className={`${fieldProps.className} pr-8`}
+            onChange={handlePhoneChange}
+            onSelect={handlePhoneSelect}
+            maxLength={14}
+            title="Phone number will be automatically formatted as (000) 000-0000"
+          />
+          {(value ?? "") !== "" && !readOnly && (
+            <ClearButton onClick={() => onChange(field.field_name, "")} />
+          )}
+        </div>,
+        validationIndicator
+      );
+    case "currency":
+      return withValidationWrapper(
+        <div className="relative w-full">
+          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 select-none">
+            $
+          </span>
+          <input
+            id={field.field_name}
+            type="text"
+            inputMode="decimal"
+            value={value ?? ""}
+            onChange={(e) => {
+              let v = e.target.value.replace(/[^0-9.]/g, "");
+              const parts = v.split(".");
+              if (parts.length > 2) v = parts[0] + "." + parts.slice(1).join("");
+              if (v.includes(".")) {
+                const [intPart, decPart] = v.split(".");
+                v = intPart + "." + (decPart ?? "").slice(0, 2);
+              }
+              onChange(field.field_name, v);
+            }}
+            placeholder={field.placeholder || "0.00"}
+            required={field.is_required}
+            className={`${className} pl-8 pr-8`}
+          />
+          {(value ?? "") !== "" && !readOnly && (
+            <ClearButton onClick={() => onChange(field.field_name, "")} />
+          )}
+        </div>,
+        validationIndicator
+      );
+
+    case "file":
+      return readOnly ? (
+        <div className="py-2 px-2 border border-gray-200 rounded bg-gray-50 text-gray-700 text-sm">
+          {value && (typeof value === "string" || value?.name) ? (typeof value === "string" ? value : value.name) : "—"}
+        </div>
+      ) : (
+        <div>
+          <input
+            type="file"
+            accept=".pdf,.doc,.docx,.txt"
+            onChange={(e) => {
+              if (e.target.files && e.target.files[0]) {
+                onChange(field.field_name, e.target.files[0]);
+              }
+            }}
+            className="w-full p-2 text-gray-700"
+            required={field.is_required}
+          />
+          <p className="text-sm text-gray-500 mt-1">
+            Accepted formats: PDF, DOC, DOCX, TXT
+          </p>
+        </div>
+      );
+    case "lookup":
+      return readOnly || isDisabledByDependency ? (
+        <div className="py-2 px-2 border border-gray-200 rounded bg-gray-50 text-gray-700">
+          {isDisabledByDependency
+            ? "— (select dependent field first)"
+            : value && String(value).trim() !== ""
+              ? String(value)
+              : "—"}
+        </div>
+      ) : (
+        <LookupField
+          value={value || ""}
+          onChange={(val) => onChange(field.field_name, val)}
+          lookupType={field.lookup_type || "organizations"}
+          placeholder={field.placeholder || "Select an option"}
+          required={field.is_required}
+          className={className}
+          disabled={readOnly || isDisabledByDependency}
+          filterByParam={(() => {
+            if (field.lookup_type !== "hiring-managers" && (field as any).lookup_type !== "contacts") return undefined;
+            const orgId = context?.organizationIdOnlyForBillingContacts != null
+              ? (isBillingContactLookupField(field) ? context.organizationIdOnlyForBillingContacts : undefined)
+              : context?.organizationId;
+            return orgId ? { key: "organization_id", value: orgId } : undefined;
+          })()}
+        />
+      );
+    case "multiselect_lookup":
+      return readOnly || isDisabledByDependency ? (
+        <div className="py-2 px-2 border border-gray-200 rounded bg-gray-50 text-gray-700">
+          {isDisabledByDependency
+            ? "— (select dependent field first)"
+            : Array.isArray(value)
+              ? value.join(", ")
+              : value && String(value).trim() !== ""
+                ? String(value)
+                : "—"}
+        </div>
+      ) : (() => {
+        let filterByParam: { key: string; value: string } | undefined;
+        if (field.lookup_type === "hiring-managers") {
+          const orgId = context?.organizationIdOnlyForBillingContacts != null
+            ? (isBillingContactLookupField(field) ? context.organizationIdOnlyForBillingContacts : undefined)
+            : context?.organizationId;
+          filterByParam = orgId ? { key: "organization_id", value: orgId } : undefined;
+        } else {
+          filterByParam = undefined;
+        }
+        return (
+          <MultiSelectLookupField
+            value={value ?? []}
+            onChange={(val) => onChange(field.field_name, Array.isArray(val) ? val : val)}
+            lookupType={(field.lookup_type as MultiSelectLookupType) || "organizations"}
+            placeholder={field.placeholder || "Type to search..."}
+            required={field.is_required}
+            className={className}
+            disabled={readOnly || isDisabledByDependency}
+            filterByParam={filterByParam}
+          />
+        );
+      })();
+    default:
+      // Check if this is a ZIP code field (label/type only — no field_name)
+      const isZipCodeField =
+        field.field_label?.toLowerCase().includes("zip") ||
+        field.field_label?.toLowerCase().includes("postal code") ||
+        field.field_name?.toLowerCase().includes("zip") ||
+        field.field_name?.toLowerCase().includes("postal");
+
+      return withValidationWrapper(
+        <div className="relative w-full">
+          <input
+            {...fieldProps}
+            type="text"
+            spellCheck={true}
+            autoCorrect="on"
+            autoCapitalize="sentences"
+            maxLength={isZipCodeField ? 5 : undefined}
+            inputMode={isZipCodeField ? "numeric" : "text"}
+            onChange={(e) => {
+              if (isZipCodeField) {
+                const digitsOnly = e.target.value.replace(/\D/g, "").slice(0, 5);
+                e.target.value = digitsOnly;
+                onChange(field.field_name, digitsOnly);
+              } else {
+                fieldProps.onChange(e);
+              }
+            }}
+            className={`${className} pr-8`}
+          />
+          {(value ?? "") !== "" && !readOnly && (
+            <ClearButton onClick={() => onChange(field.field_name, "")} />
+          )}
+        </div>,
+        validationIndicator
+      );
+  }
+}
+
+// Session cache for placement (and other) field-management responses to avoid repeated API calls
+const fieldManagementCache: Record<
+  string,
+  { fields: CustomFieldDefinition[]; cachedAt: number }
+> = {};
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+function getCachedFields(entityType: string): CustomFieldDefinition[] | null {
+  const entry = fieldManagementCache[entityType];
+  if (!entry) return null;
+  if (Date.now() - entry.cachedAt > CACHE_TTL_MS) {
+    delete fieldManagementCache[entityType];
+    return null;
+  }
+  return entry.fields;
+}
+
+function setCachedFields(entityType: string, fields: CustomFieldDefinition[]) {
+  fieldManagementCache[entityType] = { fields, cachedAt: Date.now() };
+}
+
+/** Get current user/owner id from cookies (user cookie or JWT token). Used for Owner lookup auto-fill. */
+function getOwnerIdFromCookies(): string {
+  if (typeof document === "undefined" || !document.cookie) return "";
+  try {
+    const cookieString = document.cookie;
+    const cookieMap: Record<string, string> = {};
+    cookieString.split(";").forEach((part) => {
+      const [k, v] = part.split("=").map((s) => s.trim());
+      if (!k) return;
+      cookieMap[decodeURIComponent(k)] = decodeURIComponent(v ?? "");
+    });
+    const userCookie = cookieMap["user"];
+    if (userCookie) {
+      const userData = JSON.parse(userCookie) as { id?: string | number };
+      if (userData?.id != null) return String(userData.id);
+    }
+    if (cookieMap["token"]) {
+      const payloadB64 = cookieMap["token"].split(".")[1];
+      if (payloadB64) {
+        const json = atob(payloadB64.replace(/-/g, "+").replace(/_/g, "/"));
+        const decoded = JSON.parse(json) as { userId?: string | number; id?: string | number };
+        const uid = decoded?.userId ?? decoded?.id;
+        if (uid != null) return String(uid);
+      }
+    }
+    return cookieMap["owner_id"] || cookieMap["ownerId"] || cookieMap["user_id"] || cookieMap["userId"] || "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Returns whether a single custom field has a valid value (same rules as form validation).
+ * Use this for per-field indicators (e.g. ✔ vs * on required fields).
+ */
+export function isCustomFieldValueValid(field: CustomFieldDefinition, value: any): boolean {
+  if (value === null || value === undefined) return false;
+  if (
+    field.field_type === "select" &&
+    String(field.field_label || "").trim().toLowerCase() === "credentials" &&
+    Array.isArray(value)
+  ) {
+    return value.map((v) => String(v).trim()).filter(Boolean).length > 0;
+  }
+  if (
+    field.field_type === "multiselect" ||
+    field.field_type === "multicheckbox" ||
+    field.field_type === "multiselect_lookup"
+  ) {
+    if (Array.isArray(value)) {
+      return value.map((v) => String(v).trim()).filter(Boolean).length > 0;
+    }
+    const trimmed = String(value).trim();
+    if (trimmed.includes(",")) {
+      return trimmed.split(",").map((v) => v.trim()).filter(Boolean).length > 0;
+    }
+    return trimmed.length > 0;
+  }
+  const trimmed = String(value).trim();
+
+  if (field.field_type === "select") {
+    if (trimmed === "" || trimmed.toLowerCase() === "select an option") return false;
+    if (trimmed.includes(",")) {
+      const values = trimmed.split(",").map((v) => v.trim()).filter(Boolean);
+      return values.length > 0;
+    }
+    // Value must be one of the field's options when options are defined (so "Select an option" / stale default shows red)
+    const opts = field.options;
+    if (opts != null) {
+      let list: string[] = [];
+      if (Array.isArray(opts)) {
+        list = opts.filter((o): o is string => typeof o === "string").map((o) => String(o).trim()).filter(Boolean);
+      } else if (typeof opts === "string") {
+        const s = opts.trim();
+        try {
+          const parsed = JSON.parse(s);
+          if (Array.isArray(parsed)) {
+            list = parsed.filter((o): o is string => typeof o === "string").map((o) => String(o).trim()).filter(Boolean);
+          } else {
+            list = s.split(/\r?\n/).map((o) => o.trim()).filter(Boolean);
+          }
+        } catch {
+          list = s.split(/\r?\n/).map((o) => o.trim()).filter(Boolean);
+        }
+      }
+      if (list.length > 0 && !list.includes(trimmed)) return false;
+    }
+    return true;
+  }
+
+  if (field.field_type === "number") {
+    const cleaned = trimmed.replace(/[$,]/g, "").trim();
+    if (cleaned === "") return false;
+    return !isNaN(parseFloat(cleaned));
+  }
+
+  if (trimmed === "") return false;
+
+  if (field.field_type === "date") {
+    // For generic "Date Added" style fields, accept any non-empty value so they don't block saves
+    const normalizedLabel = String(field.field_label || "")
+      .toLowerCase()
+      .replace(/[_-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .replace(/[:]+$/g, "")
+      .trim();
+    const isDateAdded =
+      normalizedLabel === "date added" || normalizedLabel.includes("date added");
+    if (isDateAdded && trimmed.length > 0) {
+      return true;
+    }
+
+    let dateToValidate = trimmed;
+    if (/^\d{2}\/\d{2}\/\d{4}$/.test(trimmed)) {
+      const [month, day, year] = trimmed.split("/");
+      dateToValidate = `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateToValidate)) return false;
+    const date = new Date(dateToValidate);
+    if (isNaN(date.getTime())) return false;
+    const [year, month, day] = dateToValidate.split("-");
+    if (
+      date.getUTCFullYear() !== parseInt(year) ||
+      date.getUTCMonth() + 1 !== parseInt(month) ||
+      date.getUTCDate() !== parseInt(day)
+    )
+      return false;
+    return true;
+  }
+
+  const isZipCodeField =
+    field.field_label?.toLowerCase().includes("zip") ||
+    field.field_label?.toLowerCase().includes("postal code") ||
+    field.field_name?.toLowerCase().includes("zip");
+  if (isZipCodeField) return /^\d{5}$/.test(trimmed);
+
+  const isNonNegativeField =
+    field.field_label?.toLowerCase().includes("employees") ||
+    field.field_label?.toLowerCase().includes("offices") ||
+    field.field_label?.toLowerCase().includes("oasis key") ||
+    field.field_name?.toLowerCase().includes("employees") ||
+    field.field_name?.toLowerCase().includes("offices") ||
+    field.field_name?.toLowerCase().includes("oasis");
+  if (isNonNegativeField && field.field_type === "number") {
+    const numValue = parseFloat(trimmed);
+    if (isNaN(numValue) || numValue < 0) return false;
+  }
+
+  const isDateFieldForPhone =
+    field.field_type === "date" || field.field_label?.toLowerCase().includes("date");
+  const isPhoneField =
+    !isDateFieldForPhone &&
+    (field.field_type === "phone" || field.field_label?.toLowerCase().includes("phone"));
+  if (isPhoneField && trimmed !== "") {
+    const digitsOnly = trimmed.replace(/\D/g, "");
+    if (digitsOnly.length !== 10) return false;
+    if (!/^\(\d{3}\) \d{3}-\d{4}$/.test(trimmed)) return false;
+    return isValidUSPhoneNumber(trimmed);
+  }
+
+  const isUrlField =
+    field.field_type === "url" ||
+    field.field_label?.toLowerCase().includes("website") ||
+    field.field_label?.toLowerCase().includes("url");
+  if (isUrlField && trimmed !== "") {
+    if (!/^(https?:\/\/|www\.).+/i.test(trimmed)) return false;
+    let urlToValidate = trimmed;
+    if (trimmed.toLowerCase().startsWith("www.")) {
+      const domainPart = trimmed.substring(4);
+      if (!domainPart.includes(".") || domainPart.split(".").length < 2) return false;
+      const domainParts = domainPart.split(".");
+      if (
+        domainParts.length < 2 ||
+        domainParts[0].length === 0 ||
+        domainParts[domainParts.length - 1].length < 2
+      )
+        return false;
+      urlToValidate = `https://${trimmed}`;
+    } else {
+      const urlWithoutProtocol = trimmed.replace(/^https?:\/\//i, "");
+      if (!urlWithoutProtocol.includes(".") || urlWithoutProtocol.split(".").length < 2)
+        return false;
+      const domainParts = urlWithoutProtocol.split("/")[0].split(".");
+      if (
+        domainParts.length < 2 ||
+        domainParts[0].length === 0 ||
+        domainParts[domainParts.length - 1].length < 2
+      )
+        return false;
+      urlToValidate = trimmed;
+    }
+    try {
+      const urlObj = new URL(urlToValidate);
+      if (
+        !urlObj.hostname ||
+        !urlObj.hostname.includes(".") ||
+        urlObj.hostname.split(".").length < 2
+      )
+        return false;
+      if (urlObj.hostname.split(".").pop()!.length < 2) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+export type UseCustomFieldsOptions = {
+  /** When provided, these field labels are not treated as required (e.g. when context doesn't require them). */
+  skipRequiredForLabels?: string[];
+};
+
+export function useCustomFields(entityType: string, options?: UseCustomFieldsOptions) {
+  const [customFields, setCustomFields] = React.useState<
+    CustomFieldDefinition[]
+  >([]);
+  const [customFieldValues, setCustomFieldValues] = React.useState<
+    Record<string, any>
+  >({});
+  const [isLoading, setIsLoading] = React.useState(true);
+
+  const fetchCustomFields = React.useCallback(async () => {
+    const cached = getCachedFields(entityType);
+    if (cached && cached.length >= 0) {
+      setCustomFields(cached);
+      setCustomFieldValues((prev) => {
+        const ownerIdFromCookie = getOwnerIdFromCookies();
+        const next: Record<string, any> = {};
+        cached.forEach((fld: CustomFieldDefinition) => {
+          if (prev[fld.field_name] !== undefined) {
+            next[fld.field_name] = prev[fld.field_name];
+            return;
+          }
+          const isOwnerLookup =
+            fld.field_type === "lookup" &&
+            String((fld as any).lookup_type || "").trim().toLowerCase() === "owner";
+          next[fld.field_name] =
+            isOwnerLookup && ownerIdFromCookie
+              ? ownerIdFromCookie
+              : (fld.default_value || "").trim();
+        });
+        return next;
+      });
+      setIsLoading(false);
+      // Refresh in background (non-blocking)
+      fetch(`/api/admin/field-management/${entityType}`)
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.customFields?.length) {
+            const sortedFields = (data.customFields || []).sort(
+              (a: CustomFieldDefinition, b: CustomFieldDefinition) =>
+                a.sort_order - b.sort_order
+            );
+            setCachedFields(entityType, sortedFields);
+            setCustomFields(sortedFields);
+          }
+        })
+        .catch(() => { });
+      return;
+    }
+    try {
+      setIsLoading(true);
+      const response = await fetch(`/api/admin/field-management/${entityType}`);
+      const data = await response.json();
+
+      if (response.ok) {
+        const sortedFields = (data.customFields || []).sort(
+          (a: CustomFieldDefinition, b: CustomFieldDefinition) =>
+            a.sort_order - b.sort_order
+        );
+        setCachedFields(entityType, sortedFields);
+        setCustomFields(sortedFields);
+
+        // Initialize custom field values (seed Owner lookup from cookies when applicable)
+        setCustomFieldValues((prev) => {
+          const ownerIdFromCookie = getOwnerIdFromCookies();
+          const next: Record<string, any> = {};
+          sortedFields.forEach((fld: CustomFieldDefinition) => {
+            if (prev[fld.field_name] !== undefined) {
+              next[fld.field_name] = prev[fld.field_name];
+              return;
+            }
+            const isOwnerLookup =
+              fld.field_type === "lookup" &&
+              String((fld as any).lookup_type || "").trim().toLowerCase() === "owner";
+            next[fld.field_name] =
+              isOwnerLookup && ownerIdFromCookie
+                ? ownerIdFromCookie
+                : (fld.default_value || "").trim();
+          });
+          return next;
+        });
+      }
+    } catch (err) {
+      console.error("Error fetching custom fields:", err);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [entityType]);
+
+  const handleCustomFieldChange = React.useCallback(
+    (fieldName: string, value: any) => {
+      setCustomFieldValues((prev) => ({
+        ...prev,
+        [fieldName]: value,
+      }));
+    },
+    []
+  );
+
+  const validateCustomFields = React.useCallback(() => {
+    const skipRequiredForLabels = options?.skipRequiredForLabels ?? [];
+    for (const field of customFields) {
+      if (skipRequiredForLabels.includes(field.field_label ?? "")) continue;
+      if (field.is_required && !field.is_hidden) {
+        const value = customFieldValues[field.field_name];
+        if (!isCustomFieldValueValid(field, value)) {
+          let errorMessage = `${field.field_label} is required`;
+
+          // Add specific error messages for validation failures (label/type only)
+          const isZipCodeField =
+            field.field_label?.toLowerCase().includes("zip") ||
+            field.field_label?.toLowerCase().includes("postal code") ||
+            field.field_name?.toLowerCase().includes("zip");
+          if (isZipCodeField && value && String(value).trim() !== "") {
+            errorMessage = `${field.field_label} must be exactly 5 digits`;
+          }
+
+          const isNonNegativeField =
+            field.field_label?.toLowerCase().includes("employees") ||
+            field.field_label?.toLowerCase().includes("offices") ||
+            field.field_label?.toLowerCase().includes("oasis key") ||
+            field.field_name?.toLowerCase().includes("employees") ||
+            field.field_name?.toLowerCase().includes("offices") ||
+            field.field_name?.toLowerCase().includes("oasis");
+          if (isNonNegativeField && value && !isNaN(parseFloat(String(value)))) {
+            const numValue = parseFloat(String(value));
+            if (numValue < 0) {
+              errorMessage = `${field.field_label} must be 0 or greater`;
+            }
+          }
+
+          if (field.field_type === "number" && value && String(value).trim() !== "") {
+            const cleaned = String(value).trim().replace(/[$,]/g, "").trim();
+            if (cleaned === "" || isNaN(parseFloat(cleaned))) {
+              errorMessage = `${field.field_label} must be a valid number`;
+            }
+          }
+
+          // Add specific error message for phone validation failures (exclude date fields e.g. Start Date)
+          const isDateField =
+            field.field_type === "date" ||
+            field.field_label?.toLowerCase().includes("date");
+          const isPhoneFieldError =
+            !isDateField &&
+            (field.field_type === "phone" ||
+              field.field_label?.toLowerCase().includes("phone"));
+          if (isPhoneFieldError && value && String(value).trim() !== "") {
+            const trimmed = String(value).trim();
+            const digitsOnly = trimmed.replace(/\D/g, "");
+            if (digitsOnly.length !== 10) {
+              errorMessage = `${field.field_label} must be a complete 10-digit phone number`;
+            } else {
+              if (!isValidUSPhoneNumber(trimmed)) {
+                errorMessage = `${field.field_label} contains an invalid area code or exchange code (must start with 2-9)`;
+              }
+            }
+          }
+
+          // Add specific error message for URL validation failures (field_type/label only)
+          const isUrlFieldError =
+            field.field_type === "url" ||
+            field.field_label?.toLowerCase().includes("website") ||
+            field.field_label?.toLowerCase().includes("url");
+          if (isUrlFieldError && value && String(value).trim() !== "") {
+            const trimmed = String(value).trim();
+            const urlPattern = /^(https?:\/\/|www\.).+/i;
+            if (!urlPattern.test(trimmed)) {
+              errorMessage = `${field.field_label} must start with http://, https://, or www.`;
+            } else {
+              try {
+                // If URL starts with www., prepend https:// for validation
+                const urlToValidate = trimmed.toLowerCase().startsWith('www.')
+                  ? `https://${trimmed}`
+                  : trimmed;
+                new URL(urlToValidate);
+              } catch {
+                errorMessage = `${field.field_label} must be a valid URL`;
+              }
+            }
+          }
+
+          return {
+            isValid: false,
+            message: errorMessage,
+          };
+        }
+      }
+    }
+    return { isValid: true, message: "" };
+  }, [customFields, customFieldValues, options?.skipRequiredForLabels]);
+
+  const getCustomFieldsForSubmission = React.useCallback(() => {
+    const customFieldsToSend: Record<string, any> = {};
+    customFields.forEach((field) => {
+      if (!field.is_hidden) {
+        let valueToSend = customFieldValues[field.field_name];
+
+        // Convert date fields from mm/dd/yyyy to YYYY-MM-DD for backend
+        if (field.field_type === "date" && valueToSend) {
+          const dateStr = String(valueToSend).trim();
+          // If it's in mm/dd/yyyy format, convert to YYYY-MM-DD
+          if (/^\d{2}\/\d{2}\/\d{4}$/.test(dateStr)) {
+            const [month, day, year] = dateStr.split("/");
+            valueToSend = `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+          }
+          // If it's already in YYYY-MM-DD format, use as-is
+        }
+
+        customFieldsToSend[field.field_label] = valueToSend;
+      }
+    });
+    return customFieldsToSend;
+  }, [customFields, customFieldValues]);
+
+  React.useEffect(() => {
+    fetchCustomFields();
+  }, [fetchCustomFields]);
+
+  return {
+    customFields,
+    customFieldValues,
+    setCustomFieldValues, // ✅ yeh line zaroor add karo
+    isLoading,
+    handleCustomFieldChange,
+    validateCustomFields,
+    getCustomFieldsForSubmission,
+    refetch: fetchCustomFields,
+  };
+}
